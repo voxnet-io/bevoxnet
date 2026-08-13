@@ -1,0 +1,16 @@
+node_modules
+
+#Hardhat files
+cache
+artifacts
+
+# Secrets: ignore every .env* variant, but keep the committed templates.
+.env*
+!.env.example
+!.env.prod.example
+
+# Internal-only working docs (kept locally, not published)
+internal/
+
+# Local Hardhat chain deployment artifact (meaningless off-chain)
+deployments-1337.json

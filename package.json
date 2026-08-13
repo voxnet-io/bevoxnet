@@ -1,0 +1,49 @@
+{
+  "name": "bevoxnet",
+  "version": "1.0.0",
+  "description": "VoxNet protocol smart contracts (Diamond/EIP-2535).",
+  "main": "index.js",
+  "scripts": {
+    "test": "hardhat test",
+    "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "deploy:mainnet": "dotenv -e .env.prod -- hardhat run scripts/deploy.js --network polygon",
+    "verify:mainnet": "dotenv -e .env.prod -- hardhat run scripts/verifyDeployment.js --network polygon"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/voxnet-io/bevoxnet.git"
+  },
+  "author": "voxnet-io",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/voxnet-io/bevoxnet/issues"
+  },
+  "homepage": "https://github.com/voxnet-io/bevoxnet#readme",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-chai-matchers": "^2.0.0",
+    "@nomicfoundation/hardhat-ethers": "^3.0.0",
+    "@nomicfoundation/hardhat-network-helpers": "^1.0.0",
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@nomicfoundation/hardhat-verify": "^2.1.3",
+    "@typechain/ethers-v6": "^0.5.0",
+    "@typechain/hardhat": "^9.0.0",
+    "chai": "^4.3.4",
+    "dotenv": "^16.4.5",
+    "dotenv-cli": "^7.4.4",
+    "ethers": "^6.4.0",
+    "hardhat": "^2.22.0",
+    "hardhat-contract-sizer": "^2.10.0",
+    "hardhat-gas-reporter": "^1.0.8",
+    "prettier": "^3.0.0",
+    "prettier-plugin-solidity": "^1.2.0",
+    "solidity-coverage": "^0.8.0",
+    "typechain": "^8.3.0"
+  },
+  "dependencies": {
+    "@chainlink/contracts": "^1.5.0",
+    "@chainlink/local": "^0.2.3",
+    "@openzeppelin/contracts": "^5.1.0",
+    "HARDHAT": "npm:hardhat@^2.28.0",
+    "viem": "^2.41.2"
+  }
+}
