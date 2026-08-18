@@ -34,13 +34,13 @@ library LibVoxTokenStorage {
         mapping(address => bool) rewardClaimInProgress;
         mapping(address => uint256) lastTransferBlock;
         mapping(address => uint256) lastVoteBlock;
-        // NEW: Storage provider tranche tracking
+        // Storage provider tranche tracking
         uint256 storageProviderPOLBalance;
         uint256 storageProviderUSDCBalance;
-        // NEW: Turbo topup transaction tracking
+        // Turbo topup transaction tracking
         string[] turboTopupTransactionIds;
         mapping(string => TurboTopupRecord) turboTopupRecords;
-        // NEW: Pull-model unclaimed reward balances (accrued but not yet withdrawn)
+        // Pull-model unclaimed reward balances (accrued but not yet withdrawn)
         mapping(address => uint256) unclaimedPOL;
         mapping(address => uint256) unclaimedUSDC;
         // One-way bootstrap latch. While false, the owner may run direct diamondCut

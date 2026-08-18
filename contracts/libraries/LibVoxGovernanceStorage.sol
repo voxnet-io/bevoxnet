@@ -31,7 +31,6 @@ library LibVoxGovernanceStorage {
         uint256 proposedStorageProviderPercentage;
         uint256 proposedAdminApplicantFeeInPolWei;
         uint256 proposedAdminVoteDeadlineInBlocks;
-        // ✅ NEW: Proposal duration constraints
         uint256 proposedMinQuotaProposalDuration;
         uint256 proposedMaxQuotaProposalDuration;
         uint256 proposedMinFacetProposalDuration;
@@ -54,7 +53,6 @@ library LibVoxGovernanceStorage {
         uint256 storageProviderPercentage;
         uint256 adminApplicantFeeInPolWei;
         uint256 adminVoteDeadlineInBlocks;
-        // ✅ NEW: Proposal duration constraints
         uint256 minQuotaProposalDuration;
         uint256 maxQuotaProposalDuration;
         uint256 minFacetProposalDuration;
@@ -79,21 +77,17 @@ library LibVoxGovernanceStorage {
         mapping(address => mapping(uint256 => mapping(bool => uint256))) votesByUser;
         QuotaProposal quotaProposal;
         CurrentQuotas currentQuotas;
-        // Admin Voting Structure - ✅ UPDATED: Removed boolean from mappings
         address[] proposedAdminAddresses;
         uint256 adminVoteId;
         uint256 adminVoteDeadline;
         address storageProviderAddress;
         address signingAddress;
         mapping(address => mapping(uint256 => bool)) isAdminApplicant;
-        // ✅ CHANGED: Only track FOR votes (removed bool key)
         mapping(address => mapping(uint256 => mapping(address => uint256))) adminVotesByUser; // voter => voteId => candidate => votes
         mapping(uint256 => mapping(address => uint256)) totalVotesPerAdminCandidate; // voteId => candidate => total votes
         mapping(address => mapping(uint256 => uint256)) adminCandidateIndex;
         mapping(address => mapping(uint256 => bool)) hasVotedForCandidate;
-        // ✅ NEW: Storage IDs for admin applicants
         mapping(address => mapping(uint256 => string)) adminApplicantStorageId;
-        // ✅ NEW: Initializer for governance-voted facet upgrades
         address proposedInit;
         bytes proposedInitCalldata;
         // ============================================
@@ -108,6 +102,10 @@ library LibVoxGovernanceStorage {
         mapping(address => bool) hasVoxAssistantInvite;
         mapping(address => uint256) voxAssistantInviteIndex; // 1-based; 0 = not present
         mapping(address => uint256) voxAssistantInviteSentAt;
+        // In-flight sentinel: true only while ratifyUpgrade executes a governance cut; authorizes
+        // the single self-call to executeGovernanceCut. This is regular storage, not EIP-1153
+        // transient storage — set and cleared within the same transaction.
+        bool governanceCutInProgress;
     }
 
     function governanceStorage() internal pure returns (GovernanceStorage storage gs) {

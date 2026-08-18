@@ -480,7 +480,7 @@ describe("VoxTokenFacet - Flash Loan Protection", function () {
     const canVoteBefore = await tokenFacet.canVoteThisBlock(await user.getAddress());
     expect(canVoteBefore).to.equal(true);
 
-    await (await tokenFacet.connect(user).recordVoteActivity(await user.getAddress())).wait(); // CHANGED: user calls for themselves
+    await (await tokenFacet.connect(user).recordVoteActivity(await user.getAddress())).wait(); // user calls for themselves
 
     const canVoteAfter = await tokenFacet.canVoteThisBlock(await user.getAddress());
     expect(canVoteAfter).to.equal(false);
@@ -499,7 +499,7 @@ describe("VoxTokenFacet - Flash Loan Protection", function () {
 
     const currentBlock = await ethers.provider.getBlockNumber();
 
-    await (await tokenFacet.connect(user).recordVoteActivity(await user.getAddress())).wait(); // CHANGED: user calls for themselves
+    await (await tokenFacet.connect(user).recordVoteActivity(await user.getAddress())).wait(); // user calls for themselves
 
     const canVote = await tokenFacet.canVoteThisBlock(await user.getAddress());
     expect(canVote).to.equal(false);
@@ -858,6 +858,38 @@ describe("VoxTokenFacet - Reward Distribution", function () {
     )).wait();
 
     await mine(3);
+  });
+
+  it("routes storage-provider USDC to storageProviderAddress and keeps the deposit watermark synced", async () => {
+    // Use a dedicated storage-provider destination distinct from the owner.
+    await (await governanceFacet.connect(owner).setStorageProviderAddress(user2.address)).wait();
+
+    const diamondAddr = await diamond.getAddress();
+    const oneUSDC = 1_000_000n; // 6 decimals
+    const D1 = 100n * oneUSDC;
+
+    // Deposit D1 USDC, then trigger deposit detection via a VOX transfer (runs _accrue).
+    await (await mockUSDC.connect(owner).transfer(diamondAddr, D1)).wait();
+    await (await tokenFacet.connect(owner).transfer(user.address, ethers.parseEther("1000"))).wait();
+
+    const [, trancheUSDC1] = await tokenFacet.getStorageProviderTranche();
+    expect(trancheUSDC1).to.equal(D1 / 100n); // 1% storage-provider cut
+
+    // Withdraw the full USDC tranche: it must go to storageProviderAddress (user2), not the owner.
+    const spBefore = await mockUSDC.balanceOf(user2.address);
+    await (await tokenFacet.connect(owner).withdrawStorageProviderFunds(0, trancheUSDC1)).wait();
+    expect((await mockUSDC.balanceOf(user2.address)) - spBefore).to.equal(trancheUSDC1);
+
+    const [, trancheUSDCAfter] = await tokenFacet.getStorageProviderTranche();
+    expect(trancheUSDCAfter).to.equal(0n);
+
+    // Second deposit must be fully detected (proves the watermark was synced by the withdrawal).
+    const D2 = 50n * oneUSDC;
+    await (await mockUSDC.connect(owner).transfer(diamondAddr, D2)).wait();
+    await (await tokenFacet.connect(owner).transfer(user.address, ethers.parseEther("1000"))).wait();
+
+    const [, trancheUSDC2] = await tokenFacet.getStorageProviderTranche();
+    expect(trancheUSDC2).to.equal(D2 / 100n); // full 1% of D2, not under-counted
   });
 
   /**

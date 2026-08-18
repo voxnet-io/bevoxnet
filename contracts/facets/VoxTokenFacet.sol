@@ -208,7 +208,7 @@ contract VoxTokenFacet is ReentrancyGuard {
      * @notice Internal function to detect and process new USDC deposits
      * @dev Compares current USDC balance with last known balance to detect deposits.
      *      Works with ANY deposit method (direct transfers, approved deposits, etc).
-     *      UPDATED: Implements 3-step waterfall allocation matching POL receive():
+     *      Implements 3-step waterfall allocation matching POL receive():
      *      1. Storage provider cut (tracked for offchain Turbo topup)
      *      2. Admin claim (tracked for withdrawal)
      *      3. Bounty pool (remaining funds for reward distribution)
@@ -981,10 +981,12 @@ contract VoxTokenFacet is ReentrancyGuard {
 
     /**
      * @notice Records voting activity to prevent immediate re-voting
-     * @dev Only the transaction origin can record their own voting activity.
-     *      Used by governance contracts to mark when a user has voted.
+     * @dev A caller may record only their own activity (voter == msg.sender). This is an
+     *      optional integration/testing hook: the built-in governance flow stamps
+     *      `lastVoteBlock` directly and does NOT call this function. It only lets a caller
+     *      stamp their own vote-cooldown block, so it cannot affect any other account.
      *
-     * @param voter The address that performed a voting action
+     * @param voter The address that performed a voting action (must be msg.sender)
      *
      * Requirements:
      * - voter must equal msg.sender (caller can only record their own activity)
@@ -993,7 +995,6 @@ contract VoxTokenFacet is ReentrancyGuard {
      * - Updates lastVoteBlock[voter] to current block
      *
      * @custom:security Uses msg.sender for access control — compatible with contract wallets
-     * @custom:usage Called by governance facets after successful votes
      */
     function recordVoteActivity(address voter) external {
         LibVoxTokenStorage.TokenStorage storage ts = LibVoxTokenStorage.tokenStorage();
@@ -1085,7 +1086,6 @@ contract VoxTokenFacet is ReentrancyGuard {
             }
         }
 
-        // ✅ PROPOSAL VOTES: Keep the boolean here since proposals still have support/oppose
         if (govStorage.hasVotedOnProposal[account][govStorage.votingStruct.currentProposalId]) {
             uint256 currentSupportVotes = govStorage.votesByUser[account][govStorage.votingStruct.currentProposalId][true];
             uint256 currentOpposeVotes = govStorage.votesByUser[account][govStorage.votingStruct.currentProposalId][false];
@@ -1294,23 +1294,35 @@ contract VoxTokenFacet is ReentrancyGuard {
     }
 
     /**
-     * @notice Withdraws storage provider funds to owner for offchain Turbo topup
-     * @dev Only owner can call. Transfers funds to owner who then executes offchain Turbo SDK.
-     *      Emits event for transparency and community monitoring.
-     *      Owner should call confirmTurboTopup() after executing the topup offchain.
+     * @notice Sends the designated storage-provider tranche to the storage-provider address
+     * @dev Owner-triggered, but the destination is fixed to `storageProviderAddress`
+     *      (governance storage) — the owner cannot redirect these funds to themselves.
+     *      The storage provider then buys Irys/Turbo credits offchain; the owner may record
+     *      it via confirmTurboTopup(). Emits an event for transparency.
      *
-     * @param polAmount Amount of POL to withdraw in wei
-     * @param usdcAmount Amount of USDC to withdraw
+     *      Note: the tranche is held in the Diamond and only tracked by
+     *      `storageProviderPOLBalance` / `storageProviderUSDCBalance`; this call is what
+     *      actually moves it out to the storage-provider address.
+     *
+     * @param polAmount Amount of POL to send in wei
+     * @param usdcAmount Amount of USDC to send
      *
      * Requirements:
      * - Caller must be contract owner
-     * - Sufficient balance must be available
+     * - `storageProviderAddress` must be set
+     * - Sufficient designated balance must be available
      *
-     * Emits: StorageProviderWithdrawal event
+     * Emits: StorageProviderWithdrawal event (first arg is the recipient storage-provider address)
      */
     function withdrawStorageProviderFunds(uint256 polAmount, uint256 usdcAmount) external nonReentrant {
         LibDiamond.enforceIsContractOwner();
         LibVoxTokenStorage.TokenStorage storage ts = LibVoxTokenStorage.tokenStorage();
+        address storageProvider = LibVoxGovernanceStorage.governanceStorage().storageProviderAddress;
+        require(storageProvider != address(0), "Storage provider not set");
+
+        // Reconcile any pending USDC deposits first, so the tranche and the deposit
+        // watermark are current before funds move out.
+        processNewUSDCDeposits();
 
         require(polAmount <= ts.storageProviderPOLBalance, "Insufficient POL balance");
         require(usdcAmount <= ts.storageProviderUSDCBalance, "Insufficient USDC balance");
@@ -1318,16 +1330,19 @@ contract VoxTokenFacet is ReentrancyGuard {
         // Update balances
         if (polAmount > 0) {
             ts.storageProviderPOLBalance -= polAmount;
-            (bool success, ) = payable(msg.sender).call{value: polAmount}("");
+            (bool success, ) = payable(storageProvider).call{value: polAmount}("");
             require(success, "POL transfer failed");
         }
 
         if (usdcAmount > 0) {
             ts.storageProviderUSDCBalance -= usdcAmount;
-            IERC20(ts.usdcTokenAddress).safeTransfer(msg.sender, usdcAmount);
+            IERC20(ts.usdcTokenAddress).safeTransfer(storageProvider, usdcAmount);
+            // Advance the deposit-detection watermark after USDC leaves the contract;
+            // otherwise future USDC deposits are under-counted by the withdrawn amount.
+            ts.lastKnownUSDCBalance = IERC20(ts.usdcTokenAddress).balanceOf(address(this));
         }
 
-        emit StorageProviderWithdrawal(msg.sender, polAmount, usdcAmount, block.timestamp);
+        emit StorageProviderWithdrawal(storageProvider, polAmount, usdcAmount, block.timestamp);
     }
 
     /**

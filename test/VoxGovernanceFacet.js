@@ -920,6 +920,41 @@ describe('VoxGovernanceFacet', function () {
         const [votingStruct] = await governanceLensFacet.returnGovernanceStorage()
         expect(votingStruct.isProposalActive).to.be.false
       })
+
+      it('resolves (fails) a passed FacetProposal whose cut reverts, without bricking the queue', async function () {
+        const { governanceFacet, governanceLensFacet, tokenFacet, owner, addr1, addr2 } = await loadFixture(deployGovernanceFixture)
+
+        const totalSupply = await tokenFacet.totalSupply()
+        const voteAmount = totalSupply / 3n
+        await tokenFacet.connect(owner).transfer(addr1.address, voteAmount)
+        await tokenFacet.connect(owner).transfer(addr2.address, voteAmount)
+        await advanceBlocksForVoting(15)
+
+        // Invalid cut: Remove a selector that does not exist -> LibDiamond reverts on execution.
+        const badCut = [{ facetAddress: ethers.ZeroAddress, action: 2, functionSelectors: ['0x12345678'] }]
+        await governanceFacet.connect(owner).createProposal(1, createSampleQuotaProposal(), 605000, badCut, ethers.ZeroAddress, '0x')
+        await governanceFacet.connect(addr1).voteOnProposal(true)
+        await governanceFacet.connect(addr2).voteOnProposal(true)
+        await advanceBlocksForVoting(605000 + 1)
+
+        // The passed-but-invalid cut is caught: proposal resolves as failed, queue clears (no brick).
+        await expect(governanceFacet.connect(addr1).ratifyUpgrade()).to.emit(governanceFacet, 'ProposalFailed')
+
+        const [votingStruct] = await governanceLensFacet.returnGovernanceStorage()
+        expect(votingStruct.isProposalActive).to.be.false
+
+        // A new proposal can still be created — governance is not bricked.
+        await expect(
+          governanceFacet.connect(owner).createProposal(0, createSampleQuotaProposal(), 605000, [], ethers.ZeroAddress, '0x')
+        ).to.not.be.reverted
+      })
+
+      it('executeGovernanceCut cannot be called directly', async function () {
+        const { governanceFacet, addr1 } = await loadFixture(deployGovernanceFixture)
+        await expect(
+          governanceFacet.connect(addr1).executeGovernanceCut([], ethers.ZeroAddress, '0x')
+        ).to.be.revertedWith('GOV_CUT_NOT_ACTIVE')
+      })
     })
   })
 
@@ -1450,6 +1485,44 @@ describe('VoxGovernanceFacet', function () {
   })
 
   describe('User Ban Management', function () {
+    it('should prevent banning the platform owner', async function () {
+      const { governanceFacet, owner } = await loadFixture(deployGovernanceFixture)
+      await expect(
+        governanceFacet.connect(owner).banUserFromPlatform(owner.address)
+      ).to.be.revertedWith('Cannot ban the platform owner')
+    })
+
+    it('should prevent a VoxAssistant from banning another VoxAssistant (owner only)', async function () {
+      const { governanceFacet, voxFacet, diamondAddress, owner, addr1, addr2 } = await loadFixture(deployGovernanceFixture)
+      const voxAssistant = await ethers.getContractAt('VoxAssistantFacet', diamondAddress)
+
+      await voxAssistant.connect(owner).inviteVoxAssistant(addr1.address)
+      await voxAssistant.connect(addr1).acceptVoxAssistantInvitation()
+      await voxAssistant.connect(owner).inviteVoxAssistant(addr2.address)
+      await voxAssistant.connect(addr2).acceptVoxAssistantInvitation()
+
+      // An assistant may not ban another active assistant.
+      await expect(
+        governanceFacet.connect(addr1).banUserFromPlatform(addr2.address)
+      ).to.be.revertedWith('Only owner can ban a VoxAssistant')
+
+      // The owner can, and it strips the assistant role.
+      await expect(governanceFacet.connect(owner).banUserFromPlatform(addr2.address)).to.not.be.reverted
+      expect(await voxFacet.isUserBannedFromPlatform(addr2.address)).to.be.true
+    })
+
+    it('should still allow a VoxAssistant to ban a normal user', async function () {
+      const { governanceFacet, voxFacet, diamondAddress, owner, addr1 } = await loadFixture(deployGovernanceFixture)
+      const voxAssistant = await ethers.getContractAt('VoxAssistantFacet', diamondAddress)
+      const stranger = (await ethers.getSigners())[6]
+
+      await voxAssistant.connect(owner).inviteVoxAssistant(addr1.address)
+      await voxAssistant.connect(addr1).acceptVoxAssistantInvitation()
+
+      await expect(governanceFacet.connect(addr1).banUserFromPlatform(stranger.address)).to.not.be.reverted
+      expect(await voxFacet.isUserBannedFromPlatform(stranger.address)).to.be.true
+    })
+
     it('should allow owner to ban a user', async function () {
       const { governanceFacet, governanceLensFacet, voxFacet, owner, addr1 } = await loadFixture(deployGovernanceFixture)
       

@@ -19,7 +19,7 @@ import {LibVoxStorage} from "../libraries/LibVoxStorage.sol";
  *      Security features:
  *      - Flash loan protection on all voting functions
  *      - Quorum requirements for proposal ratification
- *      - Owner-only proposal creation and ratification
+ *      - Owner-only proposal creation; permissionless post-deadline ratification
  *      - Reentrancy protection on payable functions
  */
 contract VoxGovernanceFacet is ReentrancyGuard {
@@ -197,13 +197,14 @@ contract VoxGovernanceFacet is ReentrancyGuard {
     }
 
     // ============================================
-    // PROPOSAL MANAGEMENT (OWNER ONLY)
+    // PROPOSAL MANAGEMENT
     // ============================================
 
     /**
      * @notice Creates a new governance proposal for voting
      * @dev Only callable by the contract owner. Only one proposal can be active at a time.
-     *      For QuotaProposals, the proposed claim percentages must sum to 100%.
+     *      For QuotaProposals, the proposed claim percentages must sum to 100%. The voting
+     *      duration must fall within the configured min/max bounds for the proposal type.
      *
      * @param proposalType The type of proposal:
      *                     - QuotaProposal: Changes to claim percentages and quorum settings
@@ -211,11 +212,15 @@ contract VoxGovernanceFacet is ReentrancyGuard {
      * @param quotaProposalData The quota settings to propose (only used for QuotaProposal type)
      * @param votingDurationInBlocks The duration of the voting period in blocks
      * @param newFacets Array of facet cuts to propose (only used for FacetProposal type)
+     * @param initAddress Initializer address run via delegatecall when a ratified FacetProposal
+     *                    is applied (address(0) to skip); only used for FacetProposal type
+     * @param initCalldata Calldata passed to initAddress on ratification; only used for
+     *                     FacetProposal type
      *
      * Requirements:
      * - No other proposal can be active
+     * - Voting duration must be within the configured min/max range for the proposal type
      * - For QuotaProposal: claim percentages must sum to 100
-     * - For FacetProposal: newFacets array must not be empty
      *
      * Emits: ProposalCreated event with proposal details
      *
@@ -224,6 +229,7 @@ contract VoxGovernanceFacet is ReentrancyGuard {
      * - Sets voting deadline
      * - Marks proposal as active
      * - Resets vote counters
+     * - For FacetProposal: stores proposed facets, initAddress, and initCalldata
      */
     function createProposal(
         LibVoxGovernanceStorage.ProposalType proposalType,
@@ -238,7 +244,6 @@ contract VoxGovernanceFacet is ReentrancyGuard {
 
         require(!govStorage.votingStruct.isProposalActive, "Currently a proposal is already active");
 
-        // ✅ NEW: Validate duration constraints
         if (proposalType == LibVoxGovernanceStorage.ProposalType.QuotaProposal) {
             require(
                 votingDurationInBlocks >= govStorage.currentQuotas.minQuotaProposalDuration &&
@@ -281,11 +286,14 @@ contract VoxGovernanceFacet is ReentrancyGuard {
     }
 
     /**
-     * @notice Revokes the currently active proposal
-     * @dev Only callable by the contract owner. Can only revoke if a proposal is active.
+     * @notice Revokes the currently active proposal (owner abort during the voting window)
+     * @dev Only callable by the contract owner, and only before the voting deadline. After the
+     *      deadline the outcome belongs to token holders and is resolved by ratifyUpgrade();
+     *      a post-deadline revoke would re-introduce an owner veto.
      *
      * Requirements:
      * - Must have an active proposal
+     * - Current block must be before the voting deadline
      *
      * Emits: ProposalRevoked event with the revoked proposal ID
      *
@@ -306,34 +314,39 @@ contract VoxGovernanceFacet is ReentrancyGuard {
 
         delete govStorage.quotaProposal;
         delete govStorage.proposedNewFacets;
+        delete govStorage.proposedInit;
+        delete govStorage.proposedInitCalldata;
         govStorage.votingStruct.isProposalActive = false;
 
         emit ProposalRevoked(govStorage.votingStruct.currentProposalId);
     }
 
     /**
-     * @notice Ratifies a proposal that has passed voting requirements
-     * @dev Only callable by the contract owner after the voting period has ended.
-     *      For QuotaProposals: Updates system quotas if quorum is met and support > opposition
-     *      For FacetProposals: Executes diamond cut if quorum is met and support > opposition
+     * @notice Resolves a proposal after its voting deadline, applying it if it passed
+     * @dev Permissionless: callable by anyone once the voting deadline has passed. The vote
+     *      outcome is already fixed, so owner-gating would only add a liveness dependency.
+     *      This function never reverts on quorum/majority — it applies the change when the
+     *      proposal passed and otherwise resolves it without applying. Either way it clears
+     *      the single-proposal queue, so an expired proposal can never brick governance.
+     *
+     *      Quorum is measured on support (FOR) votes only, so an oppose vote can never help
+     *      a proposal reach quorum.
      *
      * Requirements:
-     * - Voting period must have ended
-     * - Support votes must exceed opposition votes
-     * - Total votes must meet the required quorum percentage
+     * - A proposal must be active
+     * - The voting deadline must have passed
      *
-     * Quorum Calculation:
-     * - QuotaProposal: (support + oppose) >= (totalSupply * QuotaProposalQuorum / 100)
-     * - FacetProposal: (support + oppose) >= (totalSupply * FacetProposalQuorum / 100)
+     * Pass condition (per proposal type):
+     * - QuotaProposal: support >= (totalSupply * QuotaProposalQuorum / 100) && support > oppose
+     * - FacetProposal: support >= (totalSupply * FacetProposalQuorum / 100) && support > oppose
      *
-     * Emits: ProposalRatified event with proposal details
+     * Emits: ProposalRatified when applied, or ProposalFailed when resolved without applying
      *
      * State Changes:
-     * - For QuotaProposal: Updates all current quotas to proposed values
-     * - For FacetProposal: Executes diamond cut with proposed facets
-     * - Clears proposal data
-     * - Marks proposal as inactive
-     * - Resets vote counters
+     * - If a QuotaProposal passes: updates all current quotas to the proposed values
+     * - If a FacetProposal passes: executes the diamond cut (LibDiamond.diamondCut) with the
+     *   proposed facets, initAddress, and initCalldata
+     * - Always: clears proposal data, marks proposal inactive, resets vote counters
      */
     function ratifyUpgrade() external {
         // Item 3: permissionless after the deadline. The outcome is already fixed by the
@@ -376,8 +389,6 @@ contract VoxGovernanceFacet is ReentrancyGuard {
                 govStorage.currentQuotas.storageProviderPercentage = govStorage.quotaProposal.proposedStorageProviderPercentage;
                 govStorage.currentQuotas.adminApplicantFeeInPolWei = govStorage.quotaProposal.proposedAdminApplicantFeeInPolWei;
                 govStorage.currentQuotas.adminVoteDeadlineInBlocks = govStorage.quotaProposal.proposedAdminVoteDeadlineInBlocks;
-
-                // ✅ NEW: Update duration parameters
                 govStorage.currentQuotas.minQuotaProposalDuration = govStorage.quotaProposal.proposedMinQuotaProposalDuration;
                 govStorage.currentQuotas.maxQuotaProposalDuration = govStorage.quotaProposal.proposedMaxQuotaProposalDuration;
                 govStorage.currentQuotas.minFacetProposalDuration = govStorage.quotaProposal.proposedMinFacetProposalDuration;
@@ -394,13 +405,18 @@ contract VoxGovernanceFacet is ReentrancyGuard {
                     cutsToRatify[i] = govStorage.proposedNewFacets[i];
                 }
 
-                // Call LibDiamond.diamondCut directly rather than going through
-                // IDiamondCut(address(this)).diamondCut(...). An external self-call
-                // would enter DiamondCutFacet with msg.sender == address(this) and
-                // fail LibDiamond.enforceIsContractOwner(). The governance vote itself
-                // is the authorization here — the passed FacetProposalQuorum vote. This
-                // path also intentionally bypasses the bootstrap latch in DiamondCutFacet.
-                LibDiamond.diamondCut(cutsToRatify, govStorage.proposedInit, govStorage.proposedInitCalldata);
+                // Execute the cut through an external self-call wrapped in try/catch. A passed
+                // but invalid or hostile cut (bad selectors, protected-selector removal, or a
+                // reverting _init) then fails cleanly — we mark it failed and the queue clears
+                // below, instead of reverting ratifyUpgrade forever and bricking governance.
+                // The transient flag authorizes the single self-call (see executeGovernanceCut).
+                govStorage.governanceCutInProgress = true;
+                try this.executeGovernanceCut(cutsToRatify, govStorage.proposedInit, govStorage.proposedInitCalldata) {
+                    // cut applied
+                } catch {
+                    passed = false;
+                }
+                govStorage.governanceCutInProgress = false;
             }
         }
 
@@ -419,6 +435,20 @@ contract VoxGovernanceFacet is ReentrancyGuard {
         } else {
             emit ProposalFailed(pid, ptype);
         }
+    }
+
+    /**
+     * @notice Applies a governance-approved diamond cut. Not for direct use.
+     * @dev Callable only as the wrapped self-call from ratifyUpgrade: it requires the transient
+     *      governanceCutInProgress flag (set only by ratifyUpgrade) and msg.sender == address(this).
+     *      Kept external so ratifyUpgrade can try/catch it; a revert here is caught and the proposal
+     *      is resolved as failed rather than bricking the single-proposal queue.
+     */
+    function executeGovernanceCut(IDiamondCut.FacetCut[] calldata cuts, address initAddress, bytes calldata initCalldata) external {
+        LibVoxGovernanceStorage.GovernanceStorage storage gs = _getGovStorage();
+        require(gs.governanceCutInProgress, "GOV_CUT_NOT_ACTIVE");
+        require(msg.sender == address(this), "GOV_CUT_ONLY_SELF");
+        LibDiamond.diamondCut(cuts, initAddress, initCalldata);
     }
 
     // ============================================
@@ -481,7 +511,6 @@ contract VoxGovernanceFacet is ReentrancyGuard {
      * @notice Casts a vote for an admin candidate
      * @dev Voting power is proportional to the voter's token balance.
      *      Protected against flash loan attacks and prevents voting for yourself.
-     *      ✅ CHANGED: Only support votes allowed, no opposition voting
      *
      * @param candidate The address of the admin candidate to vote for
      *
@@ -573,7 +602,6 @@ contract VoxGovernanceFacet is ReentrancyGuard {
         uint256 feeAmount = govStorage.currentQuotas.adminApplicantFeeInPolWei;
         require(msg.value >= feeAmount, "Insufficient POL sent to pay application fee");
 
-        // ✅ NEW: Add incumbent admin when first candidate applies
         if (govStorage.proposedAdminAddresses.length == 0) {
             govStorage.adminVoteDeadline = block.number + govStorage.currentQuotas.adminVoteDeadlineInBlocks;
 
@@ -591,7 +619,7 @@ contract VoxGovernanceFacet is ReentrancyGuard {
 
         govStorage.isAdminApplicant[msg.sender][govStorage.adminVoteId] = true;
         govStorage.adminCandidateIndex[msg.sender][govStorage.adminVoteId] = govStorage.proposedAdminAddresses.length;
-        govStorage.adminApplicantStorageId[msg.sender][govStorage.adminVoteId] = storageId; // ✅ NEW
+        govStorage.adminApplicantStorageId[msg.sender][govStorage.adminVoteId] = storageId;
         govStorage.proposedAdminAddresses.push(msg.sender);
 
         // Stamp lastVoteBlock so the application counts as recent activity
@@ -644,7 +672,7 @@ contract VoxGovernanceFacet is ReentrancyGuard {
         applicants.pop();
 
         delete govStorage.adminCandidateIndex[msg.sender][govStorage.adminVoteId];
-        delete govStorage.adminApplicantStorageId[msg.sender][govStorage.adminVoteId]; // ✅ NEW
+        delete govStorage.adminApplicantStorageId[msg.sender][govStorage.adminVoteId];
 
         emit AdminApplicationRevoked(msg.sender, govStorage.adminVoteId);
     }
@@ -653,7 +681,6 @@ contract VoxGovernanceFacet is ReentrancyGuard {
      * @notice Finalizes the admin election and updates the contract owner
      * @dev Callable by anyone after the voting deadline has passed.
      *      Selects the candidate with the highest number of votes who meets the quorum.
-     *      ✅ CHANGED: Only considers FOR votes, no AGAINST votes
      *
      * Selection Process:
      * 1. Calculate required support votes: totalSupply * voxAdminChangeQuorum / 100
@@ -689,7 +716,6 @@ contract VoxGovernanceFacet is ReentrancyGuard {
 
         uint256 requiredSupportVotesForApproval = (tokenStorage.totalSupply * govStorage.currentQuotas.voxAdminChangeQuorum) / 100;
 
-        // ✅ SIMPLIFIED: Direct access without boolean
         for (uint256 i = 0; i < govStorage.proposedAdminAddresses.length; i++) {
             address candidate = govStorage.proposedAdminAddresses[i];
             uint256 forVotes = govStorage.totalVotesPerAdminCandidate[govStorage.adminVoteId][candidate];
@@ -864,6 +890,18 @@ contract VoxGovernanceFacet is ReentrancyGuard {
     function banUserFromPlatform(address user) external {
         LibVoxGovernanceStorage.enforceIsOwnerOrVoxAssistant();
         _requireNonZeroAddress(user);
+
+        LibVoxGovernanceStorage.GovernanceStorage storage govStorage = _getGovStorage();
+        address contractOwner = LibDiamond.diamondStorage().contractOwner;
+        // The platform owner can never be platform-banned (would be pure griefing;
+        // owner retains diamond ownership regardless).
+        require(user != contractOwner, "Cannot ban the platform owner");
+        // A VoxAssistant may not ban another active assistant; only the owner can,
+        // preventing assistants from stripping each other's roles.
+        if (govStorage.isVoxAssistant[user]) {
+            require(msg.sender == contractOwner, "Only owner can ban a VoxAssistant");
+        }
+
         LibVoxStorage.VoxMainStorage storage mainStorage = LibVoxStorage.mainStorage();
         require(!mainStorage.isUserPlatformBanned[user], "User is already banned");
 
@@ -877,7 +915,6 @@ contract VoxGovernanceFacet is ReentrancyGuard {
 
         // Auto-cleanup: a banned user must not retain VoxAssistant privileges
         // or an exploitable pending invitation (which they could later accept).
-        LibVoxGovernanceStorage.GovernanceStorage storage govStorage = _getGovStorage();
         if (govStorage.isVoxAssistant[user]) {
             _removeVoxAssistantInternal(govStorage, user);
             emit VoxAssistantRemoved(user, msg.sender, block.timestamp);

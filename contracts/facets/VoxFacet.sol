@@ -645,6 +645,9 @@ contract VoxFacet is ReentrancyGuard {
 
         // CRITICAL: Verify caller is a registered chapter
         require(mainStorage.checkChapterAdminAddressOut[chapterAddress] != address(0), "Caller is not a registered chapter");
+        // Verify oldAdmin is actually this chapter's current admin, so a chapter can
+        // never clear an unrelated address's admin association.
+        require(mainStorage.checkChapterAdminAddressOut[chapterAddress] == oldAdmin, "oldAdmin is not this chapter's admin");
 
         require(newAdmin != address(0), "Invalid new admin address");
 

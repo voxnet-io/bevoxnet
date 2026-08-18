@@ -78,11 +78,11 @@ describe("VoxChapter", function () {
       const facetInstance = await Facet.deploy(await diamond.getAddress());
       await facetInstance.waitForDeployment();
       
-      // ✅ REMOVED: Don't wrap, getSelectors handles v6 natively
+      // Don't wrap, getSelectors handles v6 natively
       cut.push({
         facetAddress: await facetInstance.getAddress(),
         action: FacetCutAction.Add,
-        functionSelectors: getSelectors(facetInstance) // ✅ Direct call
+        functionSelectors: getSelectors(facetInstance)
       });
     }
 

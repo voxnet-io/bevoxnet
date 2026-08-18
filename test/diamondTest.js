@@ -9,7 +9,7 @@ const {
 
 const { deployDiamond } = require('../scripts/deploy.js')
 
-const { assert } = require('chai')
+const { assert, expect } = require('chai')
 
 describe('DiamondTest', async function () {
   let diamondAddress
@@ -119,7 +119,7 @@ describe('DiamondTest', async function () {
       throw Error(`Diamond upgrade failed: ${tx.hash}`)
     }
     
-    // ✅ FIXED: Get fresh selectors from the deployed instance
+    // Get fresh selectors from the deployed instance
     const test1FacetAfter = await ethers.getContractAt('Test1Facet', test1Address)
     result = await diamondLoupeFacet.facetFunctionSelectors(test1Address)
     assert.sameMembers(Array.from(result), getSelectors(test1FacetAfter))
@@ -196,108 +196,46 @@ describe('DiamondTest', async function () {
     assert.sameMembers(Array.from(result), selectors.get(functionsToKeep))
   })
 
-  it('remove all functions and facets except \'diamondCut\' and \'facets\'', async () => {
+  it('reverts when a cut removes a protected selector (diamondCut / loupe)', async () => {
+    // The classic "strip down to diamondCut + facets()" now hits the protected-selector guard,
+    // because it would remove the loupe selectors.
     let selectors = []
-    let facets = await diamondLoupeFacet.facets()
+    const facets = await diamondLoupeFacet.facets()
     for (let i = 0; i < facets.length; i++) {
       selectors.push(...facets[i].functionSelectors)
     }
     selectors = removeSelectors(selectors, ['facets()', 'diamondCut(tuple(address,uint8,bytes4[])[],address,bytes)'])
-    
-    tx = await diamondCutFacet.diamondCut(
-      [{
-        facetAddress: ethers.ZeroAddress,
-        action: FacetCutAction.Remove,
-        functionSelectors: selectors
-      }],
-      ethers.ZeroAddress, '0x', { gasLimit: 8000000 })
-    receipt = await tx.wait()
-    if (!receipt.status) {
-      throw Error(`Diamond upgrade failed: ${tx.hash}`)
+
+    await expect(
+      diamondCutFacet.diamondCut(
+        [{ facetAddress: ethers.ZeroAddress, action: FacetCutAction.Remove, functionSelectors: selectors }],
+        ethers.ZeroAddress, '0x', { gasLimit: 8000000 })
+    ).to.be.revertedWith('LibDiamond: Cannot remove protected selector')
+
+    // Each protected loupe selector reverts individually: facetAddresses, facetAddress.
+    for (const protectedSel of ['0x52ef6b2c', '0xcdffacc6']) {
+      await expect(
+        diamondCutFacet.diamondCut(
+          [{ facetAddress: ethers.ZeroAddress, action: FacetCutAction.Remove, functionSelectors: [protectedSel] }],
+          ethers.ZeroAddress, '0x')
+      ).to.be.revertedWith('LibDiamond: Cannot remove protected selector')
     }
-    facets = await diamondLoupeFacet.facets()
-    assert.equal(facets.length, 2)
-    assert.equal(facets[0][0], addresses[0])
-    assert.sameMembers(Array.from(facets[0][1]), ['0x1f931c1c'])
-    assert.equal(facets[1][0], addresses[1])
-    assert.sameMembers(Array.from(facets[1][1]), ['0x7a0ed627'])
   })
 
-  // ✅ FIXED: Expect 5 total facets (not 6)
-  it('add most functions and facets', async () => {
-    const diamondLoupeFacetSelectors = getSelectors(diamondLoupeFacet).remove(['supportsInterface(bytes4)', 'facets()'])
-    
-    const test1Address = addresses[10]
-    const test2Address = addresses[11]
-    const test1Facet = await ethers.getContractAt('Test1Facet', test1Address)
-    const test2Facet = await ethers.getContractAt('Test2Facet', test2Address)
-    
-    const cut = [
-      {
-        facetAddress: addresses[1],
-        action: FacetCutAction.Add,
-        functionSelectors: diamondLoupeFacetSelectors
-      },
-      {
-        facetAddress: addresses[2],
-        action: FacetCutAction.Add,
-        functionSelectors: getSelectors(ownershipFacet)
-      },
-      {
-        facetAddress: test1Address,
-        action: FacetCutAction.Add,
-        functionSelectors: getSelectors(test1Facet)
-      },
-      {
-        facetAddress: test2Address,
-        action: FacetCutAction.Add,
-        functionSelectors: getSelectors(test2Facet)
-      }
-    ]
-    
-    tx = await diamondCutFacet.diamondCut(cut, ethers.ZeroAddress, '0x', { gasLimit: 8000000 })
-    receipt = await tx.wait()
-    if (!receipt.status) {
-      throw Error(`Diamond upgrade failed: ${tx.hash}`)
-    }
-    
-    const facets = await diamondLoupeFacet.facets()
-    const facetAddresses = await diamondLoupeFacet.facetAddresses()
-    
-    // ✅ FIXED: Expect 5 facets total
-    // After removal: 2 facets remain (DiamondCut at addresses[0], DiamondLoupe at addresses[1] with only 'facets()')
-    // After re-adding: 
-    //   - DiamondLoupe (addresses[1]) gets more functions added (still same facet)
-    //   - Ownership (addresses[2]) is added as NEW facet
-    //   - Test1 (addresses[6]) is added as NEW facet  
-    //   - Test2 (addresses[7]) is added as NEW facet
-    // Total: 2 + 3 new = 5 facets
-    assert.equal(facetAddresses.length, 5)
-    assert.equal(facets.length, 5)
-    
-    assert.sameMembers(
-      Array.from(facets[findAddressPositionInFacets(addresses[0], facets)][1]),
-      getSelectors(diamondCutFacet)
-    )
-    
-    // DiamondLoupe now has both the original 'facets()' and the newly added selectors
-    const expectedLoupeSelectors = diamondLoupeFacetSelectors.concat(['0x7a0ed627'])
-    assert.sameMembers(
-      Array.from(facets[findAddressPositionInFacets(addresses[1], facets)][1]),
-      expectedLoupeSelectors
-    )
-    
-    assert.sameMembers(
-      Array.from(facets[findAddressPositionInFacets(addresses[2], facets)][1]),
-      getSelectors(ownershipFacet)
-    )
-    assert.sameMembers(
-      Array.from(facets[findAddressPositionInFacets(test1Address, facets)][1]),
-      getSelectors(test1Facet)
-    )
-    assert.sameMembers(
-      Array.from(facets[findAddressPositionInFacets(test2Address, facets)][1]),
-      getSelectors(test2Facet)
-    )
+  it('allows removing and re-adding a non-protected function', async () => {
+    const ownershipSel = getSelectors(ownershipFacet).get(['isOwner()'])
+    const ownAddr = addresses[2] // OwnershipFacet
+
+    // Remove a non-protected selector — allowed.
+    await (await diamondCutFacet.diamondCut(
+      [{ facetAddress: ethers.ZeroAddress, action: FacetCutAction.Remove, functionSelectors: ownershipSel }],
+      ethers.ZeroAddress, '0x')).wait()
+    assert.equal(await diamondLoupeFacet.facetAddress(ownershipSel[0]), ethers.ZeroAddress)
+
+    // Re-add it.
+    await (await diamondCutFacet.diamondCut(
+      [{ facetAddress: ownAddr, action: FacetCutAction.Add, functionSelectors: ownershipSel }],
+      ethers.ZeroAddress, '0x')).wait()
+    assert.equal(await diamondLoupeFacet.facetAddress(ownershipSel[0]), ownAddr)
   })
 })

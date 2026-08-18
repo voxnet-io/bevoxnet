@@ -17,6 +17,9 @@ import {LibVoxGovernanceStorage} from "../libraries/LibVoxGovernanceStorage.sol"
 contract DiamondCutFacet is IDiamondCut {
     /// @notice Add/replace/remove any number of functions and optionally execute
     ///         a function with delegatecall
+    /// @dev Owner-only, and permitted only during the bootstrap phase. Once
+    ///      OwnershipFacet.finalizeBootstrap() closes the latch, this reverts and upgrades
+    ///      must go through governance (VoxGovernanceFacet.ratifyUpgrade).
     /// @param _diamondCut Contains the facet addresses and function selectors
     /// @param _init The address of the contract or facet to execute _calldata
     /// @param _calldata A function call, including function selector and arguments

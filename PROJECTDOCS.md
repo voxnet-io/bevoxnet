@@ -39,14 +39,18 @@ The Diamond is the single public-facing contract address. It contains no busines
 
 Each facet is an independently deployed contract. All facets take `diamondAddress` as a constructor argument (stored as `immutable`) for the case where the facet receives direct payments (they forward to the Diamond). **Exceptions:** `DiamondCutFacet` has no constructor and no `immutable` — it is deployed standalone and receives the Diamond's context via `delegatecall`.
 
-| Facet                | Responsibility                                                                |
-| -------------------- | ----------------------------------------------------------------------------- |
-| `DiamondCutFacet`    | Add/replace/remove function selectors on the Diamond                          |
-| `DiamondLoupeFacet`  | Introspection: enumerate facets and selectors (EIP-2535 required)             |
-| `OwnershipFacet`     | ERC-173 ownership — `owner()`, `transferOwnership()`, `isOwner()`             |
-| `VoxFacet`           | Chapter registry, chapter creation, admin management, platform ban management |
-| `VoxGovernanceFacet` | Proposal-based governance, admin elections, signing/storage config            |
-| `VoxTokenFacet`      | ERC-20 VOX token, POL/USDC reward distribution, flash loan protection         |
+| Facet                 | Responsibility                                                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `DiamondCutFacet`     | Add/replace/remove function selectors on the Diamond (owner, bootstrap-gated)                                                        |
+| `DiamondLoupeFacet`   | Introspection: enumerate facets and selectors (EIP-2535 required)                                                                    |
+| `OwnershipFacet`      | ERC-173 ownership — `owner()`, `transferOwnership()`, `isOwner()`; bootstrap latch — `finalizeBootstrap()`, `isBootstrapFinalized()` |
+| `VoxFacet`            | Chapter registry, chapter creation, admin management, platform ban management                                                        |
+| `VoxGovernanceFacet`  | Proposal-based governance, admin elections, signing/storage config, VoxAssistant role                                                |
+| `VoxTokenFacet`       | ERC-20 VOX token, POL/USDC reward distribution, flash loan protection                                                                |
+| `ChapterLensFacet`    | Read-only view aggregators for chapter data                                                                                          |
+| `GovernanceLensFacet` | Read-only view aggregators for governance, proposal, and admin-election state                                                        |
+| `TokenLensFacet`      | Read-only view aggregators for token balances and reward data                                                                        |
+| `VoxAssistantFacet`   | Delegated moderation role (invite / accept / remove VoxAssistants)                                                                   |
 
 **Test facets** (`Test1Facet`, `Test2Facet`) exist in the repo but are not registered on the Diamond in production deployment.
 
@@ -76,13 +80,13 @@ The Diamond calls into chapter contracts (via `IVoxChapter`) in these cases:
 
 Storage is partitioned using the "diamond storage" pattern: each library defines its own isolated struct at a deterministic keccak256 slot. No library shares a slot with another.
 
-| Library                   | Storage Key                                     | Contents                                                                                                                                        |
-| ------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `LibDiamond`              | `keccak256("diamond.standard.diamond.storage")` | Selector→facet mapping, facet address array, supported interfaces, `contractOwner`                                                              |
-| `LibVoxStorage`           | `keccak256("vox.main.storage")`                 | Chapter registry, admin↔chapter bidirectional mappings, platform ban state                                                                      |
-| `LibVoxTokenStorage`      | `keccak256("vox.token.storage")`                | VOX token balances, reward aggregates, USDC/oracle addresses, vote/transfer cooldown blocks, storage provider balances, turbo topup audit trail |
-| `LibVoxGovernanceStorage` | `keccak256("vox.governance.storage")`           | Quota config, active proposal state, admin election state, signing address                                                                      |
-| `LibVoxChapterStorage`    | `keccak256("vox.chapter.storage")`              | Stub (currently only `chapterName`), reserved for future use                                                                                    |
+| Library                   | Storage Key                                     | Contents                                                                                                                                                                                                             |
+| ------------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LibDiamond`              | `keccak256("diamond.standard.diamond.storage")` | Selector→facet mapping, facet address array, supported interfaces, `contractOwner`                                                                                                                                   |
+| `LibVoxStorage`           | `keccak256("vox.main.storage")`                 | Chapter registry, admin↔chapter bidirectional mappings, platform ban state                                                                                                                                           |
+| `LibVoxTokenStorage`      | `keccak256("vox.token.storage")`                | VOX token balances, reward aggregates, USDC/oracle addresses, vote/transfer cooldown blocks, storage provider balances, turbo topup audit trail, pull-model unclaimed balances, `directCutFinalized` bootstrap latch |
+| `LibVoxGovernanceStorage` | `keccak256("vox.governance.storage")`           | Quota config, active proposal state, admin election state, signing address, VoxAssistant registry                                                                                                                    |
+| `LibVoxChapterStorage`    | `keccak256("vox.chapter.storage")`              | Stub (currently only `chapterName`), reserved for future use                                                                                                                                                         |
 
 ---
 
@@ -126,8 +130,10 @@ Holds ERC-20 state (balances, supply, name/symbol) alongside reward tracking. Th
 - `totalAggregateAdminPOL` — cumulative POL admin share (accumulates from `receive()`; admin withdraws via `withdrawAdminPOL()`)
 - `adminWithdrawnPOL` — total POL the admin has already withdrawn
 - `allowances` — ERC-20 approval mappings for `transferFrom` support
-- `storageProviderPOLBalance` / `storageProviderUSDCBalance` — storage provider's accumulated cut (withdrawn via `withdrawStorageProviderFunds()`)
+- `storageProviderPOLBalance` / `storageProviderUSDCBalance` — storage provider's accumulated cut (held in the Diamond; paid out to `storageProviderAddress` via `withdrawStorageProviderFunds()`)
+- `unclaimedPOL[user]` / `unclaimedUSDC[user]` — pull-model reward balances accrued but not yet withdrawn
 - `turboTopupTransactionIds` / `turboTopupRecords` — audit trail for off-chain Turbo topup executions reported by the owner via `confirmTurboTopup()`
+- `directCutFinalized` — one-way bootstrap latch; once tripped by `OwnershipFacet.finalizeBootstrap()`, the direct owner `diamondCut` path is permanently disabled
 
 On claim: `reward = (balance / totalSupply) * (currentAggregate - lastClaim)`
 
@@ -148,6 +154,8 @@ proposedAdminAddresses[]        — candidates in current admin election (capped
 adminVotesByUser[][][]          — per-voter per-round per-candidate vote amount
 totalVotesPerAdminCandidate[][] — candidate totals
 adminApplicantStorageId[][]     — per-applicant per-round storage provider ID submitted at application
+voxAssistants[] / isVoxAssistant — active delegated-moderation roster and lookup
+voxAssistantInvitations[] / ...  — pending VoxAssistant invitations (opt-in, mirrors SubMod invites)
 ```
 
 ---
@@ -322,12 +330,13 @@ From `scripts/deploy.js`:
 3. Deploy `DiamondCutFacet`
 4. Deploy `Diamond(contractOwner, diamondCutFacet)`
 5. Deploy `DiamondInit`
-6. Deploy all facets: `DiamondLoupeFacet`, `OwnershipFacet`, `VoxFacet`, `VoxGovernanceFacet`, `VoxTokenFacet` — each with `diamondAddress` as constructor arg
+6. Deploy all facets: `DiamondLoupeFacet`, `OwnershipFacet`, `VoxFacet`, `VoxGovernanceFacet`, `VoxTokenFacet`, `ChapterLensFacet`, `VoxAssistantFacet`, `GovernanceLensFacet`, `TokenLensFacet` — each with `diamondAddress` as constructor arg
 7. `diamondCut` to add all facets, calling `DiamondInit.init()` as initializer
 8. Deploy `VoxChapter` master implementation
 9. `voxFacet.setChapterImplementation(implAddress)`
 10. `voxTokenFacet.initialize(diamond, usdc, priceFeed, openAdverts)`
 11. `voxGovernanceFacet.initialize(quotas, signingAddress, storageProviderAddress)`
+12. `ownershipFacet.finalizeBootstrap()` — closes the bootstrap latch so post-deploy upgrades must go through governance (production/CLI deploy only; `deployDiamond(true)`)
 
 All facets receive `(diamondAddress)` in their constructor. This address is stored as `immutable` and used only to forward accidental direct payments back to the Diamond.
 
@@ -339,7 +348,9 @@ There are two upgrade mechanisms:
 
 **Owner-direct upgrade (bootstrap phase only):** While the diamond is in bootstrap, the platform owner can submit a `diamondCut` transaction directly to add, replace, or remove function selectors with no governance vote. It is the mechanism used at deployment and for early fixes. A **one-way bootstrap latch** (`LibVoxTokenStorage.directCutFinalized`) permanently closes this path: it is tripped by an explicit owner-only call to `OwnershipFacet.finalizeBootstrap()`, which `scripts/deploy.js` invokes at the end of a successful deployment (`deployDiamond(true)`). Token transfers do **not** trip it (kept off the transfer hot path). After it trips, `DiamondCutFacet.diamondCut` reverts `"Bootstrap finalized: use governance"`. Query state via `isBootstrapFinalized()`; the trip emits `BootstrapFinalized`.
 
-**Governance-gated upgrade (`FacetProposal`):** A `FacetProposal` is created by the owner, voted on by token holders, and if support-quorum and majority are met, resolved by the permissionless `ratifyUpgrade()` (callable by anyone after the deadline). Ratification calls `LibDiamond.diamondCut()` **directly** (internal) — not the external `IDiamondCut` wrapper — so it is unaffected by the bootstrap latch. This is the only upgrade path once bootstrap is finalized.
+**Governance-gated upgrade (`FacetProposal`):** A `FacetProposal` is created by the owner, voted on by token holders, and if support-quorum and majority are met, resolved by the permissionless `ratifyUpgrade()` (callable by anyone after the deadline). Ratification runs the cut through `executeGovernanceCut()` (an external self-call guarded by a transient `governanceCutInProgress` flag) wrapped in `try/catch`, so a passed-but-invalid or hostile cut (bad selectors, protected-selector removal, or a reverting `_init`) resolves the proposal as **failed** and clears the queue instead of reverting `ratifyUpgrade()` forever and bricking governance. The cut still bypasses the bootstrap latch. This is the only upgrade path once bootstrap is finalized.
+
+**Protected selectors:** `LibDiamond.diamondCut` reverts (`"LibDiamond: Cannot remove protected selector"`) if any cut — owner-direct **or** governance — tries to _remove_ the diamond's innate selectors: `diamondCut` and the four EIP-2535 loupe functions. Replacing (upgrading) them is still allowed; only removal is blocked, so no cut can brick upgradeability or introspection. App-level selectors (governance, etc.) are intentionally not protected — a passed proposal may add/replace/remove them; a reverting cut is still caught by `ratifyUpgrade`'s `try/catch`, so it fails cleanly rather than bricking the queue.
 
 Because production deployment finalizes the latch immediately, there is no post-deploy owner-direct fix window: even the earliest fixes go through a `FacetProposal` (during bootstrap the owner still holds ~100% of supply, so the owner alone can meet quorum, but must observe the `minFacetProposalDuration` voting window ≈ 1 day). This removes the standing owner backdoor at the cost of a mandatory delay on upgrades.
 
@@ -397,10 +408,14 @@ contracts/
   facets/
     DiamondCutFacet.sol                — EIP-2535 upgrade mechanism
     DiamondLoupeFacet.sol              — EIP-2535 introspection
-    OwnershipFacet.sol                 — ERC-173 ownership
+    OwnershipFacet.sol                 — ERC-173 ownership + bootstrap latch
     VoxFacet.sol                   — Chapter registry + admin + ban management
     VoxGovernanceFacet.sol         — Proposals + admin elections + quotas
     VoxTokenFacet.sol              — VOX ERC-20 + reward distribution
+    ChapterLensFacet.sol               — Read-only chapter view aggregators
+    GovernanceLensFacet.sol            — Read-only governance view aggregators
+    TokenLensFacet.sol                 — Read-only token/reward view aggregators
+    VoxAssistantFacet.sol              — Delegated moderation role
     Test1Facet.sol / Test2Facet.sol    — Test fixtures only
   libraries/
     LibDiamond.sol                     — Diamond storage + cut/loupe logic
@@ -408,6 +423,7 @@ contracts/
     LibVoxTokenStorage.sol         — Token + reward storage
     LibVoxGovernanceStorage.sol    — Governance + quota storage
     LibVoxChapterStorage.sol       — Stub (unused)
+    LibVoxViewStructs.sol              — Shared structs for lens/view facets
   interfaces/
     IDiamondCut.sol                    — FacetCut struct + diamondCut interface
     IDiamondLoupe.sol                  — Loupe interface
@@ -427,517 +443,3 @@ test/
   cacheBugTest.js / ErrorFunds.js      — Misc tests
 hardhat.config.js                      — Polygon mainnet + testnet config
 ```
-
----
-
-## TODO: tx.origin Security Issues & Composability Fixes — ✅ Mostly Resolved
-
-**Priority: HIGH**  
-**Date Identified:** March 12, 2026  
-**Status:** Issues 2 and 3 resolved. Issue 1 (getChapterAdminAddress deprecation) pending frontend migration.
-
----
-
-### Issue Summary
-
-Three instances of `tx.origin` usage were identified in the codebase. Two have been resolved (Issues 2 and 3 — changed to `msg.sender`). Issue 1 (`getChapterAdminAddress`) has a replacement function but the original is kept for backward compatibility pending frontend migration.
-
----
-
-### 1. ❌ VoxFacet.getChapterAdminAddress() - Line 338
-
-**Current Implementation:**
-
-```solidity
-function getChapterAdminAddress() external view returns (address) {
-    return mainStorage.checkChapterAdminAddress[tx.origin];
-}
-```
-
-**Issue:**
-
-- Anti-pattern that breaks composability
-- Cannot be called from contracts
-- Prevents integration with DeFi protocols
-
-**Status:** ✅ Partially addressed with new `getUserAdminContext()` function
-
-- New function uses address argument instead of tx.origin
-- Original function remains unchanged (may still be used by frontend)
-
-**Action Needed:**
-
-- [ ] Deprecate or remove original `getChapterAdminAddress()` function
-- [ ] Update all frontend references to use `getUserAdminContext()` instead
-- [ ] Document migration path for any external integrators
-
----
-
-### 2. ✅ VoxTokenFacet.flashLoanProtection - Lines 103-104, 111-112
-
-**Status:** **Resolved.** `tx.origin` checks removed (Option A implemented). Modifier now uses `msg.sender` only:
-
-```solidity
-modifier flashLoanProtection() {
-    require(canVoteThisBlock(msg.sender), "Cannot vote: recent transfer or voting activity");
-    _;
-    ts.lastVoteBlock[msg.sender] = block.number;
-}
-```
-
-NatSpec updated to accurately describe the `msg.sender`-only 2-block cooldown. Compatible with contract wallets (Gnosis Safe, Argent, etc.).
-
----
-
-### 3. ✅ VoxTokenFacet.recordVoteActivity() - Line 706
-
-**Status:** **Resolved.** Access control changed from `tx.origin` to `msg.sender` (Option A implemented):
-
-```solidity
-function recordVoteActivity(address voter) external {
-    require(voter == msg.sender, "Can only record your own activity");
-    ts.lastVoteBlock[voter] = block.number;
-}
-```
-
-NatSpec `@custom:security` updated to: "Uses msg.sender for access control — compatible with contract wallets".
-
----
-
-### Discussion Questions — ✅ Resolved
-
-All discussion questions have been addressed:
-
-1. **Multisig Support:** Contract wallets now fully supported — `msg.sender`-only access control throughout.
-2. **Threat Model:** The 2-block cooldown on `msg.sender` provides basic flash loan mitigation. `tx.origin` checks removed as they provided no additional security while blocking contract wallets.
-3. **Breaking Changes:** Project is pre-mainnet — clean break approach used. No migration needed.
-4. **Design Goals:** Security and composability prioritized. Both EOAs and contract wallets are supported.
-
----
-
-### Implementation Priority — ✅ Complete
-
-1. **Immediate:** ✅ Document current behavior and known limitations
-2. **High:** ✅ Fix recordVoteActivity access control (Option A — `msg.sender`)
-3. **High:** ✅ Fix flashLoanProtection approach (Option A — `msg.sender` only)
-4. **Medium:** Deprecate old `getChapterAdminAddress()` function — pending frontend migration
-5. **Low:** Add comprehensive integration tests with multisig wallets — future work
-
----
-
-### Testing Requirements
-
-Core `tx.origin` fixes verified — remaining integration tests for future:
-
-- [x] Voting from EOA (direct user wallet)
-- [ ] Voting from Gnosis Safe multisig
-- [ ] Voting from Argent smart contract wallet
-- [ ] Flash loan attack simulation (borrow, vote, return)
-- [x] Multi-block holding period scenarios
-- [x] Edge case: zero balance after voting
-- [x] Integration with governance contracts
-- [x] recordVoteActivity called from multiple contexts
-
----
-
-### Related Files
-
-- `contracts/facets/VoxFacet.sol` - getChapterAdminAddress (line 338)
-- `contracts/facets/VoxTokenFacet.sol` - flashLoanProtection (lines 103-112)
-- `contracts/facets/VoxTokenFacet.sol` - recordVoteActivity (line 706)
-- `contracts/libraries/LibVoxTokenStorage.sol` - Token storage structure
-
----
-
-### References
-
-- [Consensys: tx.origin Security Best Practices](https://consensys.github.io/smart-contract-best-practices/development-recommendations/solidity-specific/tx-origin/)
-- [EIP-2535 Diamond Standard](https://eips.ethereum.org/EIPS/eip-2535)
-- [OpenZeppelin: Voting Snapshot Mechanism](https://docs.openzeppelin.com/contracts/4.x/governance#token_snapshot)
-
----
-
----
-
-## TODO: Consolidated Issue Tracker
-
-**Last Updated:** Current session  
-**Status Key:** ✅ Resolved/By Design  
-**Summary:** 25 of 25 items resolved (✅). 0 items pending.
-
----
-
-### CRITICAL — Direct Fund Loss / Production-Breaking
-
----
-
-#### C-1 ✅ `_transferCustom` never emits `event Transfer(from, to, amount)`
-
-**File:** `contracts/facets/VoxTokenFacet.sol`  
-**Impact:** Every VOX token transfer is silent on-chain. MetaMask, Rabby, Ledger, Polygonscan, every indexer and subgraph will show zero transfer history. The token appears to have no on-chain activity. Breaks every standard ERC-20 wallet and explorer integration at the infrastructure level.  
-**Fix:** Add `emit Transfer(from, to, amount)` inside `_transferCustom`.  
-**Status:** ✅ Resolved in prior session.
-
----
-
-#### C-2 ✅ Reward claim cursors advance before sends — permanent fund loss on failure
-
-**File:** `contracts/facets/VoxTokenFacet.sol`, `distributeReward()`  
-**Impact:** `lastRewardClaimInPOL[account]` was written before `call{value}`. `lastRewardClaimInUSDC[account]` was written before the `try-catch` send.  
-**Fix:** `RewardClaimFailed(address indexed account, uint256 polAmount, uint256 usdcAmount)` event added and emitted when `!polSuccess || !usdcSuccess`. Cursor-before-send reorder implemented in prior session.  
-**Status:** ✅ Resolved.
-
----
-
-#### C-3 ✅ `VoxTokenFacet.initialize` — duplicate ownership check + missing `Transfer` mint event
-
-**File:** `contracts/facets/VoxTokenFacet.sol`  
-**Fix:** Redundant `require` removed; `emit Transfer(address(0), deployer, totalSupply)` added after minting.  
-**Status:** ✅ Resolved in prior session.
-
----
-
-### HIGH — Security Vulnerabilities
-
----
-
-#### H-1 ✅ Uninitialized implementation contract (`VoxChapter`)
-
-**File:** `contracts/VoxChapter.sol`  
-**Fix:** Constructor guard added: `constructor() { initialized = true; }`. Clones copy bytecode only, so this locks the master without affecting clone behavior.  
-**Status:** ✅ Resolved in prior session.
-
----
-
-#### H-2 ✅ `applyAsNewAdmin` uses `payable.transfer()` for excess refund — locks out all multisig/contract wallets
-
-**File:** `contracts/facets/VoxGovernanceFacet.sol`  
-**Fix:** Replaced with `call{value}` + `require(refundSuccess, "Refund failed")`.  
-**Status:** ✅ Resolved in prior session.
-
----
-
-#### H-3 ✅ `rescueChapterFunds` (formerly `withdrawFundsIfBanned`) — USDC transfer return value now checked
-
-**File:** `contracts/VoxChapter.sol`  
-**Fix:** Function renamed to `rescueChapterFunds()`. Guard relaxed to `require(isBanned || isRemoved, "Not banned or removed")` to allow fund recovery from both banned and removed chapters. USDC transfer now uses `SafeERC20.safeTransfer` which reverts on failure.  
-**Status:** ✅ Resolved in session 2.
-
----
-
-#### H-4 ✅ `prepareForRemoval` reentrancy window — ban flag temporarily cleared during external POL sends
-
-**File:** `contracts/VoxChapter.sol`  
-**Fix:** `nonReentrant` modifier added to `prepareForRemoval`. The `ReentrancyGuard` was already imported.  
-**Status:** ✅ Resolved in prior session.
-
----
-
-#### H-5 ✅ `createChapter` signature bound to `msg.sender` and `chainId`
-
-**File:** `contracts/facets/VoxFacet.sol`  
-**Fix:** Signed payload already includes `msg.sender` and `block.chainid`: `keccak256(abi.encodePacked(chapterName, msg.sender, block.chainid))`. Code confirmed correct — the earlier docs description was stale.  
-**Status:** ✅ Resolved (code already correct).
-
----
-
-#### H-6 ✅ `flashLoanProtection` in `VoxTokenFacet` — `tx.origin` removed
-
-**File:** `contracts/facets/VoxTokenFacet.sol`, lines 103–112  
-**Status:** **Resolved.** `tx.origin` checks removed entirely. Modifier now uses `msg.sender` only (Option A). Both the `require(canVoteThisBlock(msg.sender))` check and the post-execution `ts.lastVoteBlock[msg.sender] = block.number` stamp use `msg.sender` exclusively. NatSpec updated to reflect the 2-block `msg.sender` cooldown without referencing `tx.origin`.
-
----
-
-#### H-7 ✅ `flashLoanProtection` in `VoxGovernanceFacet` — inconsistent, incorrect check order, modifier removed
-
-**File:** `contracts/facets/VoxGovernanceFacet.sol`  
-**Status:** **Resolved.**
-
-- `flashLoanProtection` modifier removed from GovernanceFacet entirely.
-- All three affected functions (`voteOnProposal`, `voteForNewAdmin`, `applyAsNewAdmin`) now inline the check in the correct semantic order: active state → deadline → eligibility → voting power → canVote() → logic → stamp.
-- Double-writes of `lastVoteBlock[msg.sender]` (modifier write + manual write in body) eliminated — single stamp at the end of each function.
-- Canonical `canVote()` helper extracted into `LibVoxTokenStorage` and used by both GovernanceFacet and TokenFacet, so both apply identical rules including the `> 0` guards on block numbers (previously GovernanceFacet was missing these).
-- `ratifyNewAdmin` guard order fixed: `proposedAdminAddresses.length > 0` now fires before `highestVotes > 0` (previously the second check was unreachable when the election was inactive).
-- `applyAsNewAdmin` now stamps `lastVoteBlock[msg.sender]` consistently with the other voting-adjacent actions.
-
----
-
-#### H-8 ✅ `recordVoteActivity` — `tx.origin` replaced with `msg.sender`
-
-**File:** `contracts/facets/VoxTokenFacet.sol`, line 706  
-**Status:** **Resolved.** Access control changed from `require(voter == tx.origin)` to `require(voter == msg.sender, "Can only record your own activity")`. NatSpec updated: `@custom:security` now reads "Uses msg.sender for access control — compatible with contract wallets".
-
----
-
-#### H-9 ✅ `setBanned(true)` — stale comment removed, manual pull model confirmed
-
-**File:** `contracts/VoxChapter.sol`, `setBanned()`  
-**Status:** **Resolved.** Per Q1 resolution: fund recovery from banned chapters remains a **manual pull** by the platform owner via `withdrawFundsIfBanned()`. No automatic transfer occurs on ban. Stale comment removed (see L-3).
-
----
-
-### MEDIUM — Correctness / Invariant Violations
-
----
-
-#### M-1 ✅ `removeChapter` inactive array dedup check broken at index 0
-
-**File:** `contracts/facets/VoxFacet.sol`, `removeChapter()`  
-**Fix:** Replaced fragile index-0 check with `if (!mainStorage.isChapterBanned[chapterAddress])` flag check. The `isChapterBanned` flag is cleared immediately after this block, so checking it before clearing is correct.  
-**Status:** ✅ Resolved in session 2.
-
----
-
-#### M-2 ✅ Distribution truncation dust permanently locked
-
-**File:** `contracts/VoxChapter.sol`, `_distributeFunds()`  
-**Fix:** Integer remainder (dust) now added to the chapter owner's distribution for both POL and USDC.  
-**Status:** ✅ Resolved in prior session.
-
----
-
-#### M-3 ✅ Inconsistent quorum comparisons in `ratifyUpgrade`
-
-**File:** `contracts/facets/VoxGovernanceFacet.sol`  
-**Fix:** Confirmed both `QuotaProposal` and `FacetProposal` now use `>=` for quorum check. NatSpec updated to document `>=` behavior.  
-**Status:** ✅ Resolved in session 2.
-
----
-
-#### M-4 ✅ `applyAsNewAdmin` now stamps `lastVoteBlock` — resolved with H-7
-
-**File:** `contracts/facets/VoxGovernanceFacet.sol`  
-**Status:** **Resolved.** All three voting-adjacent functions (`voteOnProposal`, `voteForNewAdmin`, `applyAsNewAdmin`) now stamp `tokenStorage.lastVoteBlock[msg.sender] = block.number` at the end of execution, consistent with the `flashLoanProtection` read-side check. See H-7 for complete fix details.
-
----
-
-#### M-5 ✅ Banned subMod forfeits accumulated chapter rewards — confirmed intentional
-
-**File:** `contracts/VoxChapter.sol`, `banUserFromChapter()`  
-**Policy:** `banUserFromChapter` calls `_removeSubModInternal` (no reward distribution), while `removeSubMod` calls `claimChapterRewards` first. Banned subMods do not receive pending rewards.  
-**Decision:** By design — banned users should not receive funds. Update code comment to explicitly document this policy: `// Intentional: banned subMods forfeit accumulated unclaimed rewards`.
-
----
-
-#### M-6 ✅ Admin election applicants array is unbounded — hard cap implemented
-
-**File:** `contracts/facets/VoxGovernanceFacet.sol`, `applyAsNewAdmin()`  
-**Status:** **Implemented.** `MAX_ADMIN_CANDIDATES = 100` constant added to `LibVoxGovernanceStorage`. `applyAsNewAdmin` now enforces `require(proposedAdminAddresses.length < MAX_ADMIN_CANDIDATES, "Candidate list full")`. The incumbent is auto-added (counts toward the cap), so effective open-slot capacity is 99.
-
----
-
-### LOW / Informational
-
----
-
-#### L-1 🟡 `getChapterAdminAddress()` uses `tx.origin` — deprecate in favor of `getUserAdminContext()`
-
-**File:** `contracts/facets/VoxFacet.sol`, line 338  
-**Status:** Replacement function `getUserAdminContext(address user)` already exists.  
-**Action:** Remove `getChapterAdminAddress()`. Update all frontend references to use `getUserAdminContext()`.  
-**Decision:** Implement after frontend migration confirmed complete.
-
----
-
-#### L-2 ✅ VOX token is not ERC-20 complete — no `transferFrom`, `approve`, or `allowance`
-
-**File:** `contracts/facets/VoxTokenFacet.sol`  
-**Status:** **Implemented.**
-
-- `allowances` mapping added to `LibVoxTokenStorage.TokenStorage`
-- `approve(address spender, uint256 amount)` — sets `allowances[msg.sender][spender]`, emits `Approval`
-- `allowance(address owner, address spender)` — view getter
-- `transferFrom(address sender, address recipient, uint256 amount)` — mirrors `transfer`'s reward distribution, vote adjustment, and transfer-block tracking; spends allowance with explicit underflow check
-- `Approval` event added alongside existing `Transfer` event
-
----
-
-#### L-3 ✅ `VoxChapter.setBanned` — stale comment fixed
-
-**File:** `contracts/VoxChapter.sol`, `setBanned()`  
-**Status:** **Implemented.** NatSpec rewritten to accurately document behavior: suspended chapters cannot distribute rewards; funds are NOT automatically transferred and remain accessible to the platform owner via `rescueChapterFunds()` (formerly `withdrawFundsIfBanned()`). The stale `// transfer funds to diamond if banned` comment has been removed.
-
----
-
-### NEW FINDINGS — Identified and Resolved
-
-The following issues were surfaced during code review and implemented in the same pass.
-
----
-
-#### N-1 ✅ CRITICAL: Platform ban bypass in `VoxChapter` (silent, complete)
-
-**File:** `contracts/VoxChapter.sol`  
-**Impact:** All `LibVoxStorage.mainStorage().isUserBanned[x]` reads inside a chapter clone resolve the storage pointer at `keccak256("vox.main.storage")` within the **chapter contract's own EVM context** (address space), not the Diamond's. The chapter has no storage at that slot — the read always returns `false`. Platform bans were completely bypassed at the chapter level for: `setChapterAdmin`, `inviteSubMod`, `_addSubModInternal`, `changeChapterOwnerShare`, `removeSubMod`, `removeMyselfAndAppointSuccessor`.  
-**Fix:** All six call sites replaced with `IVoxDiamond(diamondAddress).isUserBannedFromPlatform(address)` — a callback to the Diamond that reads the correct storage. The `LibVoxStorage` and (unused) `LibDiamond` imports removed from `VoxChapter.sol`.  
-**Status:** ✅ Resolved.
-
----
-
-#### N-2 ✅ `isSubmod` mapped only one chapter per subMod — multi-chapter membership impossible
-
-**File:** `contracts/libraries/LibVoxStorage.sol`, `contracts/VoxChapter.sol`  
-**Impact:** The old `mapping(address => address) isSubmod` stored exactly one chapter address per subMod, preventing multi-chapter membership. In addition, the write inside `VoxChapter._addSubModInternal` suffered the same storage context bug as N-1.  
-**Fix:**
-
-- `LibVoxStorage.VoxMainStorage`: replaced `isSubmod` with `subModChaptersList` (array), `isSubModOf` (bool mapping), `subModChapterIndex` (1-based swap-and-pop index).
-- `VoxFacet`: added `registerSubMod(address)`, `deregisterSubMod(address)` (chapter-gated callbacks), `getSubModChapters(address)` (view), and two internal helpers `_registerSubModInStorage` / `_deregisterSubModFromStorage`.
-- `acceptSubModInvitation`: calls `IVoxDiamond(diamondAddress).registerSubMod(msg.sender)` after local state update.
-- `removeSubMod`, `_removeSubModInternal`: call `IVoxDiamond(diamondAddress).deregisterSubMod(_subMod)` after local cleanup.
-- `prepareForRemoval`: global registry cleanup moved to `VoxFacet.removeChapter()` (executed before calling `prepareForRemoval`) to avoid a `nonReentrant` deadlock in the call chain Diamond→chapter→Diamond.
-- `migrateChapter`: deregisters subMods from old chapter registry entry and registers them under new chapter address directly in Diamond storage.  
-  **Status:** ✅ Resolved.
-
----
-
-#### N-3 ✅ SubMod reward dilution on new member join
-
-**File:** `contracts/VoxChapter.sol`, `acceptSubModInvitation()`  
-**Impact:** When a new subMod accepted an invitation, their per-seat claim baseline was set to `totalAggregateSubModsPOL / newCount`. Existing members had unrealized rewards proportional to `totalAggregateSubModsPOL / oldCount`. The new denominator shrinks their per-seat entitlement retroactively — existing subMods lose a fraction of rewards they had already accrued.  
-**Fix:** Before calling `_addSubModInternal`, flush all existing subMods if above threshold: call `processNewDeposits()` + `claimChapterRewards()`. Also added `nonReentrant` to `acceptSubModInvitation`. The migration path (`addSubMod`, called by Diamond only) does not get the pre-payout.  
-**Status:** ✅ Resolved.
-
----
-
-#### N-4 ✅ `hasVotedForCandidate` declared but never set — `undoVotes` iterates all candidates on every transfer
-
-**File:** `contracts/libraries/LibVoxGovernanceStorage.sol`, `contracts/facets/VoxGovernanceFacet.sol`, `contracts/facets/VoxTokenFacet.sol`  
-**Impact:** `hasVotedForCandidate[voter][voteId]` existed in storage but was never written. `undoVotes()` (called on every transfer) unconditionally looped up to 100 candidates per account, paying 2,100+ gas per cold SLOAD for voters and non-voters alike.  
-**Fix:** `voteForNewAdmin` now sets `govStorage.hasVotedForCandidate[msg.sender][govStorage.adminVoteId] = true` after recording the vote. `undoVotes` wraps the candidate loop in `if (govStorage.hasVotedForCandidate[account][govStorage.adminVoteId])` — non-voters pay one warm SLOAD instead of up to 100 cold SLOADs.  
-**Status:** ✅ Resolved.
-
----
-
-### Open Design Questions (Blocking Implementation) — ALL RESOLVED
-
----
-
-**Q1 — `setBanned` fund transfer behavior (H-9 / L-3) ✅ RESOLVED**
-
-**Decision confirmed:** Fund recovery from banned chapters remains a **manual pull** by the platform owner via `withdrawFundsIfBanned()`. No automatic transfer happens inside `setBanned(true)`. The existing implementation is correct as documented after the L-3 fix.
-
----
-
-**Q2 — `createChapter` signature binding (H-5) ✅ RESOLVED**
-
-**Decision confirmed:** Code already binds `msg.sender` and `block.chainid` in `createChapter` signature verification: `keccak256(abi.encodePacked(chapterName, msg.sender, block.chainid))`. The earlier docs description was stale. No code change needed.
-
----
-
-**Q3 — Quorum operator consistency (M-3) ✅ RESOLVED**
-
-**Decision confirmed:** Both `QuotaProposal` and `FacetProposal` now use `>=` for quorum checks. NatSpec updated to document this behavior.
-
----
-
-### SESSION 2 FIXES — Implemented
-
-The following items were implemented in session 2 (security hardening pass):
-
----
-
-#### S2-1 ✅ `claimChapterRewards` nonReentrant + internal refactor
-
-**File:** `contracts/VoxChapter.sol`  
-**Fix:** `claimChapterRewards()` now has `nonReentrant` modifier. `removeMyself()`, `removeSubMod()`, and `removeMyselfAndAppointSuccessor()` refactored to call `_claimChapterRewardsInternal()` (new internal function) to avoid nested ReentrancyGuard lock. All three removal functions also gained `nonReentrant`.
-
----
-
-#### S2-2 ✅ `withdrawFundsIfBanned` renamed to `rescueChapterFunds`
-
-**File:** `contracts/VoxChapter.sol`  
-**Fix:** Function renamed. Guard relaxed from `require(isBanned, "BAN")` to `require(isBanned || isRemoved, "Not banned or removed")`, allowing platform owner to recover funds stranded in removed chapters (e.g., funds sent after removal).
-
----
-
-#### S2-3 ✅ SafeERC20 in VoxTokenFacet
-
-**File:** `contracts/facets/VoxTokenFacet.sol`  
-**Fix:** Added `import SafeERC20` + `using SafeERC20 for IERC20`. Three raw `require(usdcToken.transfer(...))` calls replaced with `.safeTransfer()`: `withdrawAdminUSDC`, `claimRewards`, `withdrawStorageProviderFunds`.
-
----
-
-#### S2-4 ✅ `removeChapter` inactive array dedup fix
-
-**File:** `contracts/facets/VoxFacet.sol`  
-**Fix:** Fragile `keccak256(bytes(...))` string-compare approach replaced with simple `if (!mainStorage.isChapterBanned[chapterAddress])` flag check. Cheaper and more robust.
-
----
-
-#### S2-5 ✅ `USDCTransferFailed` event in all chapter USDC catch blocks
-
-**File:** `contracts/VoxChapter.sol`  
-**Fix:** `USDCTransferFailed(address indexed recipient, uint256 amount)` event declared and emitted in all 5 `catch` blocks across `_distributeFunds`, `_distributeToOwner`, `_distributeToSubMods`.
-
----
-
-#### S2-6 ✅ `ratifyUpgrade` NatSpec corrected (`>=` vs `>`)
-
-**File:** `contracts/facets/VoxGovernanceFacet.sol`  
-**Fix:** NatSpec corrected from `>` to `>=` to match actual code behavior for both `QuotaProposal` and `FacetProposal` quorum checks.
-
----
-
-#### S2-7 ✅ Stale comments removed from rescue function
-
-**File:** `contracts/VoxChapter.sol`  
-**Fix:** Placeholder comments in the renamed `rescueChapterFunds()` (formerly `withdrawFundsIfBanned()`) cleaned up.
-
----
-
-## Pre-Mainnet Deployment Checklist
-
-The following items **must** be verified before deploying to Polygon mainnet:
-
-### Environment Variables
-
-Mainnet deploys load `.env.prod` (non-secret config) via `npm run deploy:mainnet`
-(`dotenv -e .env.prod -- hardhat run scripts/deploy.js --network polygon`). Local/dev
-uses `.env`. See `.env.example` / `.env.prod.example`.
-
-- [ ] `I_UNDERSTAND_MAINNET=1` — Deliberate opt-in gate; `scripts/deploy.js` reverts on Polygon mainnet unless set to `1`
-- [ ] `PRIVATEKEYMAINNET` — Dedicated Polygon mainnet owner EOA key. **Not stored in any file** — shell-inject it for the single mainnet deploy (`$env:PRIVATEKEYMAINNET="0x…"`). Deploy reverts if missing. Prefer a hardware wallet / KMS signer
-- [ ] `SIGNING_ADDRESS_FE` — Production frontend signing address; written on-chain by `VoxGovernanceFacet.initialize()`. Deploy reverts if missing/invalid
-- [ ] `OPENADVERTS_ADDRESS` — Production OpenAdverts contract address (dev fallback `0x0165878A594ca255338adfa4d48449f69242Eb8F` is used only on non-mainnet; on mainnet a missing, malformed, **or** dev-fallback value is rejected and the deploy reverts)
-- [ ] `POLYGON_POL_USD_FEED` — Mainnet Chainlink POL/USD price feed address (confirm code + `decimals()` on Polygonscan)
-- [ ] `ETHERSCAN_API_KEY` — Etherscan V2 unified key; verifies all chains (incl. Polygon via chainid). No separate Polygonscan key needed
-- [ ] `PRIVATE_KEY` (dev only) — Testnet/dev key (sepolia, amoy). Defaults to the public Hardhat account; **must never hold mainnet value**
-
-### Contract Configuration
-
-- [ ] `signingAddress` — Confirm production signing key for chapter creation signatures is ready and secured (set via `VoxGovernanceFacet.initialize()`)
-- [ ] `storageProviderAddress` — Confirm production storage provider address
-- [ ] `chapterImplementation` — Deploy production `VoxChapter` implementation and call `setChapterImplementation()`
-- [ ] USDC address — Verify `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` is correct for mainnet Polygon USDC (not bridged USDC.e)
-
-### Security
-
-- [x] `VoxChapter` implementation locked with constructor guard (H-1) — ✅ resolved
-- [x] All `tx.origin` references removed (H-6, H-8) — ✅ resolved
-- [x] `getProposalState` returns `canRatify = false` for defeated proposals — ✅ verified
-- [x] `claimChapterRewards` access restricted to authorized callers + `nonReentrant` — ✅ resolved
-- [x] SafeERC20 try-catch pattern in chapter distribution functions — ✅ resolved
-- [x] SafeERC20 in VoxTokenFacet for USDC transfers (3 sites) — ✅ resolved session 2
-- [x] `rescueChapterFunds` guard relaxed to isBanned || isRemoved — ✅ resolved session 2
-- [x] `removeChapter` inactive array dedup fix (M-1) — ✅ resolved session 2
-- [x] `USDCTransferFailed` event added to all chapter USDC catch blocks — ✅ resolved session 2
-- [x] `ratifyUpgrade` NatSpec quorum operator fixed (M-3) — ✅ resolved session 2
-- [x] All former C-1, C-2, C-3, H-1–H-5, M-1–M-3 items — ✅ resolved
-
-### Deployment Verification
-
-- [ ] Run full test suite: `npx hardhat test`
-- [ ] Verify contract code on Polygonscan for all deployed contracts
-- [ ] Confirm `Diamond.owner()` returns expected deployer address
-- [ ] Confirm `getChapterImplementation()` returns expected implementation address
-- [ ] Test chapter creation with a valid signature on mainnet
-- [ ] Verify USDC deposit detection via `processNewUSDCDeposits()`
-
-### Known Remaining Issues (Pre-Mainnet Blockers)
-
-- [ ] **VoxChapter contract size: 28.6 KiB** — exceeds 24 KiB Spurious Dragon limit. Must optimize before mainnet deployment. Consider splitting into a base + extension pattern, or extracting view functions.
-- [ ] **`getMyAdminApplicationStorageId` test failure** — test references a function that doesn't exist on the contract. Test bug, not contract bug. Fix the test in `test/VoxGovernanceFacet.js:871`.
-- [ ] **`getChapterAdminAddress()` uses `tx.origin`** (L-1) — deprecate after frontend migration to `getUserAdminContext()`.
-- [ ] **Distribution truncation dust** (M-2) — resolved for chapter distributions; verify the same pattern is not needed in Diamond-level token reward distribution.
-
----

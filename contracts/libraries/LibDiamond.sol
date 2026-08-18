@@ -6,6 +6,7 @@ pragma solidity ^0.8.22;
 * EIP-2535 Diamonds: https://eips.ethereum.org/EIPS/eip-2535
 /******************************************************************************/
 import {IDiamondCut} from "../interfaces/IDiamondCut.sol";
+import {IDiamondLoupe} from "../interfaces/IDiamondLoupe.sol";
 
 // Remember to add the loupe functions from DiamondLoupeFacet to the diamond.
 // The loupe functions are required by the EIP2535 Diamonds standard
@@ -68,6 +69,24 @@ library LibDiamond {
 
     event DiamondCut(IDiamondCut.FacetCut[] _diamondCut, address _init, bytes _calldata);
 
+    /// @notice Reverts if any selector is one whose removal would brick the diamond's innate
+    ///         machinery: diamondCut or the EIP-2535 loupe functions. Runs on every cut
+    ///         (owner-direct and governance). Replacing (upgrading) them is still allowed.
+    ///         App-level selectors (e.g. governance) are intentionally NOT protected here.
+    function enforceNotRemovingProtected(bytes4[] memory _selectors) internal pure {
+        for (uint256 i; i < _selectors.length; i++) {
+            bytes4 s = _selectors[i];
+            require(
+                s != IDiamondCut.diamondCut.selector &&
+                    s != IDiamondLoupe.facets.selector &&
+                    s != IDiamondLoupe.facetFunctionSelectors.selector &&
+                    s != IDiamondLoupe.facetAddresses.selector &&
+                    s != IDiamondLoupe.facetAddress.selector,
+                "LibDiamond: Cannot remove protected selector"
+            );
+        }
+    }
+
     // Internal function version of diamondCut
     function diamondCut(IDiamondCut.FacetCut[] memory _diamondCut, address _init, bytes memory _calldata) internal {
         for (uint256 facetIndex; facetIndex < _diamondCut.length; facetIndex++) {
@@ -77,6 +96,7 @@ library LibDiamond {
             } else if (action == IDiamondCut.FacetCutAction.Replace) {
                 replaceFunctions(_diamondCut[facetIndex].facetAddress, _diamondCut[facetIndex].functionSelectors);
             } else if (action == IDiamondCut.FacetCutAction.Remove) {
+                enforceNotRemovingProtected(_diamondCut[facetIndex].functionSelectors);
                 removeFunctions(_diamondCut[facetIndex].facetAddress, _diamondCut[facetIndex].functionSelectors);
             } else {
                 revert("LibDiamondCut: Incorrect FacetCutAction");

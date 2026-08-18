@@ -2092,6 +2092,17 @@ describe("VoxFacet - Chapter Callback Functions", function () {
       ).to.be.revertedWith("Caller is not a registered chapter");
     });
 
+    it("should revert if oldAdmin is not the chapter's current admin", async () => {
+      // Impersonate the chapter contract to call the callback directly with a wrong oldAdmin.
+      await ethers.provider.send("hardhat_setBalance", [chapterAddress, "0x3635C9ADC5DEA00000"]);
+      const chapterSigner = await ethers.getImpersonatedSigner(chapterAddress);
+
+      // The chapter's real admin is `chapterAdmin`; passing a different oldAdmin must revert.
+      await expect(
+        facet.connect(chapterSigner).updateChapterAdmin(await user.getAddress(), await owner.getAddress())
+      ).to.be.revertedWith("oldAdmin is not this chapter's admin");
+    });
+
     it("should emit AdminAssigned event on successful update", async () => {
       const chapter = await ethers.getContractAt("VoxChapter", chapterAddress);
       
