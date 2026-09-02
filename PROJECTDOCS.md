@@ -45,7 +45,7 @@ Each facet is an independently deployed contract. All facets take `diamondAddres
 | `DiamondLoupeFacet`   | Introspection: enumerate facets and selectors (EIP-2535 required)                                                                    |
 | `OwnershipFacet`      | ERC-173 ownership — `owner()`, `transferOwnership()`, `isOwner()`; bootstrap latch — `finalizeBootstrap()`, `isBootstrapFinalized()` |
 | `VoxFacet`            | Chapter registry, chapter creation, admin management, platform ban management                                                        |
-| `VoxGovernanceFacet`  | Proposal-based governance, admin elections, signing/storage config, VoxAssistant role                                                |
+| `VoxGovernanceFacet`  | Proposal-based governance, admin elections (apply/vote/ratify), signing/storage config, VoxAssistant role                            |
 | `VoxTokenFacet`       | ERC-20 VOX token, POL/USDC reward distribution, flash loan protection                                                                |
 | `ChapterLensFacet`    | Read-only view aggregators for chapter data                                                                                          |
 | `GovernanceLensFacet` | Read-only view aggregators for governance, proposal, and admin-election state                                                        |
@@ -230,8 +230,10 @@ Reward claiming inside a chapter is independent of the Diamond's reward pool.
 3. Token holders call `voteForNewAdmin(candidate)` (support votes only, no opposition; self-voting is permitted)
 4. After deadline, anyone calls `ratifyNewAdmin()` (requires active election: `proposedAdminAddresses.length > 0`)
 5. Candidate with highest votes meeting quorum threshold wins; incumbent winning is a valid outcome (no-op ownership change, election resets)
-6. `LibDiamond.contractOwner` updated, `LibVoxStorage` admin flags updated
+6. The owner write is routed through `LibDiamond.setContractOwner()`, which emits the standard ERC-173 `OwnershipTransferred(previousOwner, newOwner)` event (for off-chain watchers) in addition to the app-specific `NewAdminRatified`. `LibVoxStorage` admin flags are updated: the outgoing owner loses `isAdmin` **only if** they are not also a chapter admin (`checkChapterAdminAddress == 0`), preserving chapter-scoped rights.
 7. `adminVoteId` incremented, candidate list cleared
+
+> **No-quorum auto-reset (no deadlock):** if the deadline passes with **no** candidate meeting `voxAdminChangeQuorum`, `ratifyNewAdmin()` does **not** revert — it retires the round via the internal `_resetElectionRound()`: clears `proposedAdminAddresses`, resets `adminVoteDeadline` to 0, and **increments** `adminVoteId` (mandatory — every per-round mapping is keyed by it, so reusing the id would carry stale vote totals into the next round), emitting `GovernanceRoundCancelled(round)`. This mirrors `ratifyUpgrade()`'s never-revert resolution for proposals and is fully permissionless, so a round can never stall and the incumbent cannot freeze the seat by inaction. When a candidate _does_ meet quorum the same call elects them instead (see step 6).
 
 ### 4.7 Ban Flows
 
@@ -247,42 +249,44 @@ Reward claiming inside a chapter is independent of the Diamond's reward pool.
 
 ## 5. Access Control Matrix
 
-| Action                                                                                    | Who Can Call                                                                  |
-| ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `diamondCut` (upgrade)                                                                    | Diamond owner only (via `DiamondCutFacet`), **bootstrap phase only** (see §8) |
-| `finalizeBootstrap` / `isBootstrapFinalized`                                              | Owner only (finalize) / anyone (view) — via `OwnershipFacet`                  |
-| `transferOwnership`                                                                       | Diamond owner (see §8 — democratic-election trade-off is open)                |
-| `createChapter`                                                                           | Any non-banned address with valid platform signature                          |
-| `setChapterAdmin`                                                                         | Platform owner only                                                           |
-| `revokeChapterAdmin`                                                                      | Platform owner only                                                           |
-| `updateChapterAdmin`                                                                      | Registered chapter contracts only (callback)                                  |
-| `banChapter` / `unbanChapter`                                                             | Platform owner **or VoxAssistant**                                            |
-| `removeChapter`                                                                           | Platform owner only (banned users cannot self-remove even if owner)           |
-| `banUserFromPlatform` / `unbanUserFromPlatform`                                           | Platform owner **or VoxAssistant** (via GovernanceFacet)                      |
-| `inviteVoxAssistant` / `revokeVoxAssistantInvitation` / `removeVoxAssistant`              | Platform owner only (via GovernanceFacet)                                     |
-| `acceptVoxAssistantInvitation` / `declineVoxAssistantInvitation` / `resignAsVoxAssistant` | Invited address / active VoxAssistant (self-service)                          |
-| `banUserFromChapter`                                                                      | Chapter owner or platform owner                                               |
-| `addSubMod` / `inviteSubMod`                                                              | Chapter owner or platform owner                                               |
-| `createProposal`                                                                          | Platform owner only                                                           |
-| `revokeProposal`                                                                          | Platform owner only, **before the voting deadline only**                      |
-| `ratifyUpgrade`                                                                           | Anyone (after the voting deadline — permissionless resolver)                  |
-| `voteOnProposal`                                                                          | Any VOX token holder (flash loan protected)                                   |
-| `applyAsNewAdmin`                                                                         | Any non-incumbent non-banned address (fee required)                           |
-| `voteForNewAdmin`                                                                         | Any VOX token holder (flash loan protected)                                   |
-| `ratifyNewAdmin`                                                                          | Anyone (after deadline)                                                       |
-| `initialize` (token/governance)                                                           | Platform owner, one-time only                                                 |
-| `setChapterImplementation`                                                                | Platform owner                                                                |
-| `getChapterImplementation`                                                                | Anyone (public view)                                                          |
-| `migrateChapter` / `batchMigrateChapters`                                                 | Platform owner (migrateChapter is nonReentrant)                               |
-| `withdrawAdminPOL`                                                                        | Platform owner only (via VoxTokenFacet)                                       |
-| `getAdminAvailablePOL`                                                                    | Anyone (public view)                                                          |
-| `approve` / `allowance` / `transferFrom`                                                  | ERC-20 standard — any token holder                                            |
-| `withdrawAdminUSDC` / `getAdminAvailableUSDC`                                             | Platform owner / anyone (view — pure read, no state mutation)                 |
-| `withdrawStorageProviderFunds`                                                            | Platform owner only (via VoxTokenFacet)                                       |
-| `confirmTurboTopup`                                                                       | Platform owner only (voluntary audit trail)                                   |
-| `getTurboTopupHistory` / `getTurboTopupDetails`                                           | Anyone (public view)                                                          |
-| `claimChapterRewards` (chapter)                                                           | Chapter owner, subMods, or platform owner                                     |
-| `rescueChapterFunds` (chapter)                                                            | Platform owner (chapter must be banned or removed)                            |
+| Action                                                                                    | Who Can Call                                                                      |
+| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `diamondCut` (upgrade)                                                                    | Diamond owner only (via `DiamondCutFacet`), **bootstrap phase only** (see §8)     |
+| `finalizeBootstrap` / `isBootstrapFinalized`                                              | Owner only (finalize) / anyone (view) — via `OwnershipFacet`                      |
+| `transferOwnership(address)`                                                              | Disabled — always reverts (`Use transferOwnership(address,address)`)              |
+| `transferOwnership(address,address)`                                                      | Diamond owner (rejects `address(0)`; atomically rotates the requestKey — see §8a) |
+| `setRequestKey` / `returnRequestKey`                                                      | Owner only (rotate) / anyone (view, via `GovernanceLensFacet`) — see §8a          |
+| `createChapter`                                                                           | Any non-banned address with valid platform signature                              |
+| `setChapterAdmin`                                                                         | Platform owner only                                                               |
+| `revokeChapterAdmin`                                                                      | Platform owner only                                                               |
+| `updateChapterAdmin`                                                                      | Registered chapter contracts only (callback)                                      |
+| `banChapter` / `unbanChapter`                                                             | Platform owner **or VoxAssistant**                                                |
+| `removeChapter`                                                                           | Platform owner only (banned users cannot self-remove even if owner)               |
+| `banUserFromPlatform` / `unbanUserFromPlatform`                                           | Platform owner **or VoxAssistant** (via GovernanceFacet)                          |
+| `inviteVoxAssistant` / `revokeVoxAssistantInvitation` / `removeVoxAssistant`              | Platform owner only (via GovernanceFacet)                                         |
+| `acceptVoxAssistantInvitation` / `declineVoxAssistantInvitation` / `resignAsVoxAssistant` | Invited address / active VoxAssistant (self-service)                              |
+| `banUserFromChapter`                                                                      | Chapter owner or platform owner                                                   |
+| `addSubMod` / `inviteSubMod`                                                              | Chapter owner or platform owner                                                   |
+| `createProposal`                                                                          | Platform owner only                                                               |
+| `revokeProposal`                                                                          | Platform owner only, **before the voting deadline only**                          |
+| `ratifyUpgrade`                                                                           | Anyone (after the voting deadline — permissionless resolver)                      |
+| `voteOnProposal`                                                                          | Any VOX token holder (flash loan protected)                                       |
+| `applyAsNewAdmin`                                                                         | Any non-incumbent non-banned address (fee required)                               |
+| `voteForNewAdmin`                                                                         | Any VOX token holder (flash loan protected)                                       |
+| `ratifyNewAdmin`                                                                          | Anyone (after deadline — elects a winner or auto-retires a no-quorum round)       |
+| `initialize` (token/governance)                                                           | Platform owner, one-time only                                                     |
+| `setChapterImplementation`                                                                | Platform owner                                                                    |
+| `getChapterImplementation`                                                                | Anyone (public view)                                                              |
+| `migrateChapter` / `batchMigrateChapters`                                                 | Platform owner (migrateChapter is nonReentrant)                                   |
+| `withdrawAdminPOL`                                                                        | Platform owner only (via VoxTokenFacet)                                           |
+| `getAdminAvailablePOL`                                                                    | Anyone (public view)                                                              |
+| `approve` / `allowance` / `transferFrom`                                                  | ERC-20 standard — any token holder                                                |
+| `withdrawAdminUSDC` / `getAdminAvailableUSDC`                                             | Platform owner / anyone (view — pure read, no state mutation)                     |
+| `withdrawStorageProviderFunds`                                                            | Platform owner only (via VoxTokenFacet)                                           |
+| `confirmTurboTopup`                                                                       | Platform owner only (voluntary audit trail)                                       |
+| `getTurboTopupHistory` / `getTurboTopupDetails`                                           | Anyone (public view)                                                              |
+| `claimChapterRewards` (chapter)                                                           | Chapter owner, subMods, or platform owner                                         |
+| `rescueChapterFunds` (chapter)                                                            | Platform owner (chapter must be banned or removed)                                |
 
 ### 5.1 VoxAssistant Role (delegated moderation)
 
@@ -385,9 +389,11 @@ The old clone is orphaned after migration (no registry entry, no funds). All mig
 
 6. **USDC delta detection is stateful** — relies on `lastKnownUSDCBalance` being consistent. If USDC is transferred out by any mechanism not tracked by the contract (e.g., direct ERC-20 transfer by a compromised owner), the aggregate can become inconsistent.
 
-7. **Platform owner has broad unilateral power** — can upgrade the diamond, ban users/chapters, revoke admins, set signing address, set implementation. The governance system provides community input but does not constrain the owner.
+7. **Platform owner has broad unilateral power** — can upgrade the diamond, ban users/chapters, revoke admins, set signing address, rotate the requestKey (`setRequestKey`), set implementation. The governance system provides community input but does not constrain the owner.
 
-8. **Signing address controls chapter creation** — the platform signs `keccak256(chapterName || callerAddress || chainId)`. This binds each signature to a specific caller and chain, preventing a signature for one wallet from being used by another and preventing cross-chain replay. If the signing key is compromised, unauthorized chapters can still only be created by the address the key was asked to sign for. Key rotation is via `setSigningAddress()` (owner-only).
+8. **Signing address controls chapter creation** — the platform signs `keccak256(chapterName || callerAddress || chainId)`. This binds each signature to a specific caller and chain, preventing a signature for one wallet from being used by another and preventing cross-chain replay. If the signing key is compromised, unauthorized chapters can still only be created by the address the key was asked to sign for. Key rotation is via `setChapterSignerAddress()` (owner-only).
+
+8a. **RequestKey rotates atomically with ownership** — a second protocol address (`requestKey`) is published on-chain by `VoxRequestKeyFacet` and read via `GovernanceLensFacet.returnRequestKey()`. It is the identity the off-chain signing service authenticates request callers against. It is **publish-only**: the contract stores and emits it (`RequestKeyUpdated`) but never `ecrecover`s it and never adds it to any signature payload — the `VoxFacet` chapter-creation gate still uses `chapterSignerAddress` only. Ownership can never move without a fresh requestKey: the 1-arg `transferOwnership(address)` reverts (`Use transferOwnership(address,address)`), the 2-arg `transferOwnership(address,address)` sets both atomically, every admin candidate supplies the requestKey they will use via `applyAsNewAdmin(string,address)`, and `ratifyNewAdmin()` activates the non-incumbent winner's key on handover (an incumbent re-election keeps the current key). The owner may also rotate out-of-band via `setRequestKey()`. Invariants enforced on every candidate key: nonzero, `!= prospective owner`, `!= current requestKey`, and `!= chapterSignerAddress` (separation of duties); symmetrically, `setChapterSignerAddress()` rejects `newChapterSignerAddress == requestKey`, so the two identities can never converge from either side. The requestKey private key is server-side only and must rotate in lockstep with any ownership handover / `setRequestKey`.
 
 9. **Chapter contracts are not part of the Diamond** — they are autonomous contracts. The Diamond has no slashable access to chapter funds except via `rescueChapterFunds()` (platform owner, chapter must be banned or removed) and `prepareForRemoval()` (platform owner, permanent action).
 

@@ -73,7 +73,10 @@ Polygon mainnet (guarded — see `.env.prod.example`):
 ```bash
 # Never store the mainnet key in a file; inject it for the single command:
 $env:PRIVATEKEYMAINNET = "0x<dedicated mainnet owner EOA key>"
-npm run deploy:mainnet   # requires I_UNDERSTAND_MAINNET=1 in .env.prod
+# Enable the mainnet gate, either in .env.prod (I_UNDERSTAND_MAINNET=1) or in the
+# shell as below — a shell-set value is NOT overridden by .env.prod:
+$env:I_UNDERSTAND_MAINNET = "1"
+npm run deploy:mainnet
 npm run verify:mainnet
 ```
 
