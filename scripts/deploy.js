@@ -73,9 +73,41 @@ or run without --network to use the in-process Hardhat network.`
       `Set SIGNING_ADDRESS_FE in your .env before deploying.`
     );
   }
+  // Public requestKey published on-chain via VoxRequestKeyFacet.setRequestKey after governance init.
+  // It is the signing service's request-auth identity and rotates atomically with ownership. It MUST
+  // differ from the signing address (separation of duties) and from the deployer/owner, mirroring the
+  // on-chain checks, so a misconfigured value fails fast here instead of reverting mid-deploy.
+  const requestKeyAddressFE = process.env.REQUEST_KEY_ADDRESS_FE
+  if (!requestKeyAddressFE || !ethers.isAddress(requestKeyAddressFE)) {
+    throw new Error(
+      `REQUEST_KEY_ADDRESS_FE is missing or not a valid address (got: ${requestKeyAddressFE ?? "undefined"}). ` +
+      `Set REQUEST_KEY_ADDRESS_FE in your .env before deploying.`
+    );
+  }
+  if (requestKeyAddressFE.toLowerCase() === signingAddressFE.toLowerCase()) {
+    throw new Error("REQUEST_KEY_ADDRESS_FE must differ from SIGNING_ADDRESS_FE (separation of duties).");
+  }
+  if (requestKeyAddressFE.toLowerCase() === contractOwner.address.toLowerCase()) {
+    throw new Error("REQUEST_KEY_ADDRESS_FE must differ from the deployer/owner address.");
+  }
   const chainId = network.config.chainId
   const isPolygonMainnet = chainId === 137
   const isLocalNetwork = network.name === "hardhat" || network.name === "localhost"
+  // Storage-provider address receives the on-chain storage-provider payout share and, for
+  // KMS/Aegis deployments, IS the Irys uploader wallet (so the share offsets its funding cost).
+  // Required on mainnet; on a local/dev chain it defaults to the deployer/owner (prior behaviour).
+  const storageProviderAddressRaw = process.env.STORAGE_PROVIDER_ADDRESS
+  if (isPolygonMainnet && !storageProviderAddressRaw) {
+    throw new Error(
+      "STORAGE_PROVIDER_ADDRESS must be set for a mainnet deploy (the Irys uploader/storage-provider address)."
+    );
+  }
+  const storageProviderAddressFE = storageProviderAddressRaw || contractOwner.address
+  if (!ethers.isAddress(storageProviderAddressFE)) {
+    throw new Error(
+      `STORAGE_PROVIDER_ADDRESS is not a valid address (got: ${storageProviderAddressRaw ?? "undefined"}).`
+    );
+  }
   // Etherscan V2 unified API: a single ETHERSCAN_API_KEY verifies all chains via chainid.
   const verifyApiKey = process.env.ETHERSCAN_API_KEY
   const canVerify = !isLocalNetwork && !!verifyApiKey
@@ -215,7 +247,8 @@ or run without --network to use the in-process Hardhat network.`
     'ChapterLensFacet',
     'VoxAssistantFacet',
     'GovernanceLensFacet',
-    'TokenLensFacet'
+    'TokenLensFacet',
+    'VoxRequestKeyFacet'
   ]
   const cut = [];
   let voxTokenFacetAddress = "";
@@ -326,10 +359,21 @@ or run without --network to use the in-process Hardhat network.`
   const initializeTx2 = await voxGovernanceFacet.initialize(
     quotas,
     signingAddressFE,
-    contractOwner.address
+    storageProviderAddressFE
   );
   console.log('VoxGovernanceFacet initialized:', initializeTx2.hash);
   await initializeTx2.wait();
+
+  // Seed the requestKey AFTER the signing address is set (so the on-chain `!= signingAddress` check is
+  // meaningful) and BEFORE finalizeBootstrap. Runs as owner (deployer); validates nonzero, != owner,
+  // != current(0) and != signingAddress on-chain.
+  const voxRequestKeyFacet = await ethers.getContractAt('VoxRequestKeyFacet', diamondAddress);
+  console.log('')
+  console.log('Seeding requestKey via VoxRequestKeyFacet.setRequestKey...');
+  console.log('  RequestKey:', requestKeyAddressFE);
+  const setRequestKeyTx = await voxRequestKeyFacet.setRequestKey(requestKeyAddressFE);
+  await setRequestKeyTx.wait();
+  console.log('✓ requestKey seeded:', setRequestKeyTx.hash);
 
   // Close the bootstrap latch: after this, direct owner diamondCut is permanently
   // disabled and all upgrades must go through governance (FacetProposal). Done last,
@@ -358,6 +402,9 @@ or run without --network to use the in-process Hardhat network.`
     network: network.name,
     deployer: contractOwner.address,
     deployedAt: new Date().toISOString(),
+    signingAddress: signingAddressFE,
+    requestKey: requestKeyAddressFE,
+    storageProvider: storageProviderAddressFE,
     contracts: {
       Diamond: diamondAddress,
       DiamondInit: diamondInitAddress,

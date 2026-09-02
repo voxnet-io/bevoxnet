@@ -5,8 +5,16 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IDiamondCut} from "../interfaces/IDiamondCut.sol";
 import {LibVoxTokenStorage} from "../libraries/LibVoxTokenStorage.sol";
 import {LibVoxGovernanceStorage} from "../libraries/LibVoxGovernanceStorage.sol";
+import {LibVoxRequestKeyStorage} from "../libraries/LibVoxRequestKeyStorage.sol";
 import {LibDiamond} from "../libraries/LibDiamond.sol";
 import {LibVoxStorage} from "../libraries/LibVoxStorage.sol";
+
+/// @dev Intra-diamond self-call surface exposed by VoxRequestKeyFacet. Both helpers enforce
+///      `msg.sender == address(this)`, so they are only reachable via a self-call from this facet.
+interface IVoxRequestKeyOps {
+    function validateRequestKeyOnlyDiamond(address newKey, address prospectiveOwner) external view;
+    function rotateRequestKeyOnlyDiamond(address newKey, address changedBy) external;
+}
 
 /**
  * @title VoxGovernanceFacet
@@ -85,10 +93,17 @@ contract VoxGovernanceFacet is ReentrancyGuard {
     event NewAdminRatified(address indexed previousAdmin, address indexed newAdmin, uint256 netVotes);
 
     /**
-     * @notice Emitted when the signing address is updated
-     * @param newAddress The new signing address
+     * @notice Emitted when an admin election round is retired without electing a new admin
+     *         (deadline passed with no candidate meeting quorum). Symmetric with ProposalFailed.
+     * @param round The adminVoteId of the round that was retired
      */
-    event SigningAddressUpdated(address indexed newAddress);
+    event GovernanceRoundCancelled(uint256 indexed round);
+
+    /**
+     * @notice Emitted when the chapter-signer address is updated
+     * @param newAddress The new chapter-signer address
+     */
+    event ChapterSignerAddressUpdated(address indexed newAddress);
 
     /**
      * @notice Emitted when the storage provider address is updated
@@ -151,7 +166,7 @@ contract VoxGovernanceFacet is ReentrancyGuard {
      *               - Claim percentages for Vox, viewers, and third parties (must sum to 100)
      *               - Quorum requirements for different proposal types (0-100%)
      *               - Admin application fee and voting duration
-     * @param signingAddress The address authorized to sign governance-related messages
+     * @param chapterSignerAddress The address authorized to sign chapter-creation messages
      * @param storageProviderAddress The address of the decentralized storage provider
      *
      * Requirements:
@@ -163,12 +178,12 @@ contract VoxGovernanceFacet is ReentrancyGuard {
      *
      * Emits: GovernanceInitialized event (if implemented)
      */
-    function initialize(LibVoxGovernanceStorage.CurrentQuotas memory quotas, address signingAddress, address storageProviderAddress) external {
+    function initialize(LibVoxGovernanceStorage.CurrentQuotas memory quotas, address chapterSignerAddress, address storageProviderAddress) external {
         LibDiamond.enforceIsContractOwner();
         LibVoxGovernanceStorage.GovernanceStorage storage govStorage = _getGovStorage();
 
         require(!govStorage.initialized, "Already initialized");
-        _requireNonZeroAddress(signingAddress);
+        _requireNonZeroAddress(chapterSignerAddress);
         _requireNonZeroAddress(storageProviderAddress);
 
         require(quotas.voxAdminChangeQuorum <= 100, "Invalid admin quorum");
@@ -192,7 +207,7 @@ contract VoxGovernanceFacet is ReentrancyGuard {
 
         govStorage.currentQuotas = quotas;
         govStorage.storageProviderAddress = storageProviderAddress;
-        govStorage.signingAddress = signingAddress;
+        govStorage.chapterSignerAddress = chapterSignerAddress;
         govStorage.initialized = true;
     }
 
@@ -567,9 +582,15 @@ contract VoxGovernanceFacet is ReentrancyGuard {
      *      If this is the first applicant in the round, sets the voting deadline.
      *      Excess POL sent is refunded to the applicant.
      *
+     *      The caller also supplies the requestKey they will publish if elected. It is validated
+     *      up-front (nonzero, != caller, != current requestKey, != chapterSignerAddress) and stored per
+     *      (candidate, round); it only goes live if this candidate wins ratifyNewAdmin. See
+     *      VoxRequestKeyFacet.
+     *
      * Requirements:
      * - Must pass flash loan protection (2 blocks since last transfer/vote)
      * - Must not have already applied in this admin vote round
+     * - Must supply a valid requestKey (see validateRequestKeyOnlyDiamond)
      * - Must send at least the required application fee in POL
      *
      * Application Fee:
@@ -583,12 +604,15 @@ contract VoxGovernanceFacet is ReentrancyGuard {
      * - Marks applicant as candidate for this round
      * - Adds applicant to proposed admin addresses array
      * - Records applicant's index in the array
+     * - Records applicant's proposed requestKey for this round
      * - Sets admin vote deadline (if first applicant)
      * - Increases total POL rewards by the fee amount
      *
+     * @param storageId Off-chain storage identifier for the applicant's admin profile.
+     * @param newRequestKey The requestKey the applicant will publish on-chain if elected.
      * @custom:security Reentrancy protection via nonReentrant modifier recommended
      */
-    function applyAsNewAdmin(string memory storageId) external payable nonReentrant {
+    function applyAsNewAdmin(string memory storageId, address newRequestKey) external payable nonReentrant {
         LibVoxGovernanceStorage.GovernanceStorage storage govStorage = _getGovStorage();
         LibVoxTokenStorage.TokenStorage storage tokenStorage = LibVoxTokenStorage.tokenStorage();
 
@@ -598,6 +622,10 @@ contract VoxGovernanceFacet is ReentrancyGuard {
 
         // 2. Flash loan / cooldown check (canonical shared implementation)
         require(LibVoxTokenStorage.canVote(tokenStorage, msg.sender), "Cannot vote: recent transfer or voting activity");
+
+        // 3. Reject an invalid requestKey up-front (validated against THIS applicant as prospective
+        //    owner). The key only goes live if this candidate wins ratifyNewAdmin.
+        IVoxRequestKeyOps(address(this)).validateRequestKeyOnlyDiamond(newRequestKey, msg.sender);
 
         uint256 feeAmount = govStorage.currentQuotas.adminApplicantFeeInPolWei;
         require(msg.value >= feeAmount, "Insufficient POL sent to pay application fee");
@@ -610,7 +638,8 @@ contract VoxGovernanceFacet is ReentrancyGuard {
 
             require(currentOwner != msg.sender, "Current owner cannot apply as new admin");
 
-            // Add incumbent admin to candidates list
+            // Add incumbent admin to candidates list. Deliberately NO requestKey is stored for the
+            // incumbent: if they win, ratifyNewAdmin skips rotation and the current key is retained.
             govStorage.proposedAdminAddresses.push(currentOwner);
             govStorage.isAdminApplicant[currentOwner][govStorage.adminVoteId] = true;
             govStorage.adminCandidateIndex[currentOwner][govStorage.adminVoteId] = 0;
@@ -620,6 +649,7 @@ contract VoxGovernanceFacet is ReentrancyGuard {
         govStorage.isAdminApplicant[msg.sender][govStorage.adminVoteId] = true;
         govStorage.adminCandidateIndex[msg.sender][govStorage.adminVoteId] = govStorage.proposedAdminAddresses.length;
         govStorage.adminApplicantStorageId[msg.sender][govStorage.adminVoteId] = storageId;
+        govStorage.adminApplicantRequestKey[msg.sender][govStorage.adminVoteId] = newRequestKey;
         govStorage.proposedAdminAddresses.push(msg.sender);
 
         // Stamp lastVoteBlock so the application counts as recent activity
@@ -673,6 +703,7 @@ contract VoxGovernanceFacet is ReentrancyGuard {
 
         delete govStorage.adminCandidateIndex[msg.sender][govStorage.adminVoteId];
         delete govStorage.adminApplicantStorageId[msg.sender][govStorage.adminVoteId];
+        delete govStorage.adminApplicantRequestKey[msg.sender][govStorage.adminVoteId];
 
         emit AdminApplicationRevoked(msg.sender, govStorage.adminVoteId);
     }
@@ -689,21 +720,22 @@ contract VoxGovernanceFacet is ReentrancyGuard {
      *
      * Requirements:
      * - Admin voting period must have ended
-     * - At least one candidate must have cast votes and met the quorum requirement
      * - An election must be active (proposedAdminAddresses must be non-empty)
      * - Incumbent winning results in a no-op ownership change (event still emitted)
      *
-     * Emits: NewAdminRatified event with old admin, new admin, and total votes
+     * Outcome (permissionless, never reverts on quorum — mirrors ratifyUpgrade()):
+     * - A candidate meets quorum: elected; emits OwnershipTransferred + NewAdminRatified
+     * - No candidate meets quorum: the round is retired via _resetElectionRound() and a fresh
+     *   election can begin; emits GovernanceRoundCancelled. This auto-reset replaces the old
+     *   "No candidates met the quorum" revert, so a round can never deadlock.
      *
      * State Changes:
-     * - Updates contract owner in LibDiamond storage
-     * - Updates admin status in LibVoxStorage (removes old, adds new)
-     * - Increments admin vote ID (starts new election round)
-     * - Clears proposed admin addresses array
+     * - On election: updates contract owner (LibDiamond) and admin flags (LibVoxStorage)
+     * - Always: increments adminVoteId and clears the candidate list
      *
      * @custom:security High-stakes function - changes contract ownership
      */
-    function ratifyNewAdmin() external {
+    function ratifyNewAdmin() external nonReentrant {
         LibVoxGovernanceStorage.GovernanceStorage storage govStorage = _getGovStorage();
         LibVoxTokenStorage.TokenStorage storage tokenStorage = LibVoxTokenStorage.tokenStorage();
         LibDiamond.DiamondStorage storage diamondStorage = LibDiamond.diamondStorage();
@@ -711,38 +743,79 @@ contract VoxGovernanceFacet is ReentrancyGuard {
 
         require(block.number >= govStorage.adminVoteDeadline, "Admin voting period has not ended yet");
 
+        uint256 candidateCount = govStorage.proposedAdminAddresses.length;
+        require(candidateCount > 0, "No active admin election");
+
         address selectedCandidate;
         uint256 highestVotes = 0;
-
+        uint256 currentRound = govStorage.adminVoteId;
         uint256 requiredSupportVotesForApproval = (tokenStorage.totalSupply * govStorage.currentQuotas.voxAdminChangeQuorum) / 100;
 
-        for (uint256 i = 0; i < govStorage.proposedAdminAddresses.length; i++) {
+        for (uint256 i = 0; i < candidateCount; i++) {
             address candidate = govStorage.proposedAdminAddresses[i];
-            uint256 forVotes = govStorage.totalVotesPerAdminCandidate[govStorage.adminVoteId][candidate];
+            uint256 forVotes = govStorage.totalVotesPerAdminCandidate[currentRound][candidate];
 
-            if (forVotes >= requiredSupportVotesForApproval) {
-                if (forVotes > highestVotes) {
-                    highestVotes = forVotes;
-                    selectedCandidate = candidate;
-                }
+            if (forVotes >= requiredSupportVotesForApproval && forVotes > highestVotes) {
+                highestVotes = forVotes;
+                selectedCandidate = candidate;
             }
         }
 
-        require(govStorage.proposedAdminAddresses.length > 0, "No active admin election");
-        require(highestVotes > 0, "No candidates met the quorum");
+        // No candidate met quorum: retire the round instead of reverting (mirrors
+        // ratifyUpgrade() for proposals). This branch is permissionless and replaces the old
+        // "No candidates met the quorum" revert, so a round can never deadlock — the incumbent
+        // cannot freeze the seat by inaction.
+        if (highestVotes == 0) {
+            _resetElectionRound(govStorage);
+            return;
+        }
 
         address previousAdmin = diamondStorage.contractOwner;
 
+        // Strip the outgoing owner's platform-admin flag ONLY if they are not also a
+        // chapter admin, so a general ownership handover never revokes chapter-scoped rights.
         if (mainStorage.checkChapterAdminAddress[previousAdmin] == address(0)) {
             mainStorage.isAdmin[previousAdmin] = false;
         }
 
         mainStorage.isAdmin[selectedCandidate] = true;
-        diamondStorage.contractOwner = selectedCandidate;
+
+        // Route the owner write through LibDiamond so the standard ERC-173
+        // OwnershipTransferred(previousOwner, newOwner) event is emitted for off-chain
+        // watchers, in addition to the app-specific NewAdminRatified below.
+        LibDiamond.setContractOwner(selectedCandidate);
+
+        // Rotate the requestKey to the winner's supplied key ONLY on a real handover. An incumbent
+        // re-election (selectedCandidate == previousAdmin) stores no candidate key, so rotating would
+        // publish address(0); skip it and retain the current key. Read the key under currentRound
+        // BEFORE the adminVoteId++ below, which is keyed by that same round id.
+        if (selectedCandidate != previousAdmin) {
+            IVoxRequestKeyOps(address(this)).rotateRequestKeyOnlyDiamond(
+                govStorage.adminApplicantRequestKey[selectedCandidate][currentRound],
+                msg.sender
+            );
+        }
+
         govStorage.adminVoteId++;
         delete govStorage.proposedAdminAddresses;
 
         emit NewAdminRatified(previousAdmin, selectedCandidate, highestVotes);
+    }
+
+    /**
+     * @dev Retires the current admin election round: clears candidates, zeroes the deadline and
+     *      increments adminVoteId. Bumping the id is mandatory — every per-round mapping
+     *      (totalVotesPerAdminCandidate, adminVotesByUser, isAdminApplicant, adminCandidateIndex,
+     *      hasVotedForCandidate, adminApplicantStorageId) is keyed by it, so reusing it would
+     *      carry stale vote totals / "already voted" flags into the next round. Called only by
+     *      ratifyNewAdmin() when the deadline passes with no qualifying winner.
+     */
+    function _resetElectionRound(LibVoxGovernanceStorage.GovernanceStorage storage govStorage) internal {
+        uint256 retiredRound = govStorage.adminVoteId;
+        delete govStorage.proposedAdminAddresses;
+        govStorage.adminVoteDeadline = 0;
+        govStorage.adminVoteId = retiredRound + 1;
+        emit GovernanceRoundCancelled(retiredRound);
     }
 
     // ============================================
@@ -750,25 +823,27 @@ contract VoxGovernanceFacet is ReentrancyGuard {
     // ============================================
 
     /**
-     * @notice Updates the signing address for governance-related operations
-     * @dev Only callable by the contract owner. The signing address is used for off-chain signature verification.
+     * @notice Updates the chapter-signer address for chapter-creation signature verification
+     * @dev Only callable by the contract owner. The chapter-signer address is used for off-chain signature verification.
      *
-     * @param newSigningAddress The new address to set as the signing authority
+     * @param newChapterSignerAddress The new address to set as the chapter-signer authority
      *
      * Requirements:
      * - New address cannot be zero address
+     * - New address must differ from the current requestKey (separation of duties)
      *
-     * Emits: SigningAddressUpdated event with the new address
+     * Emits: ChapterSignerAddressUpdated event with the new address
      *
      * State Changes:
-     * - Updates govStorage.signingAddress to the new value
+     * - Updates govStorage.chapterSignerAddress to the new value
      */
-    function setSigningAddress(address newSigningAddress) external {
+    function setChapterSignerAddress(address newChapterSignerAddress) external {
         LibDiamond.enforceIsContractOwner();
-        _requireNonZeroAddress(newSigningAddress);
+        _requireNonZeroAddress(newChapterSignerAddress);
+        require(newChapterSignerAddress != LibVoxRequestKeyStorage.requestKeyStorage().requestKey, "ChapterSigner: equals requestKey");
         LibVoxGovernanceStorage.GovernanceStorage storage govStorage = _getGovStorage();
-        govStorage.signingAddress = newSigningAddress;
-        emit SigningAddressUpdated(newSigningAddress);
+        govStorage.chapterSignerAddress = newChapterSignerAddress;
+        emit ChapterSignerAddressUpdated(newChapterSignerAddress);
     }
 
     /**
@@ -797,7 +872,7 @@ contract VoxGovernanceFacet is ReentrancyGuard {
     // VIEW FUNCTIONS
     // ============================================
     //
-    // Public read aggregators (returnSigningAddress, returnStorageProviderAddress,
+    // Public read aggregators (returnChapterSignerAddress, returnStorageProviderAddress,
     // canVoteOnProposal, canVoteForAdmin, getCurrentGovernanceState,
     // getAdminElectionState, getAllCurrentQuotas, getProposalState,
     // getAdminApplicantStorageId, returnGovernanceStorage,

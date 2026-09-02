@@ -19,6 +19,11 @@ async function advanceBlocksForVoting(blocks = 15) {
 describe('VoxGovernanceFacet', function () {
   const zeroAddress = ethers.ZeroAddress;
 
+  // Fresh, valid requestKey for each admin application: nonzero and (with overwhelming probability)
+  // distinct from the applicant, the current on-chain requestKey and the signing address, so it passes
+  // VoxRequestKeyFacet's four validation checks in every round.
+  const newRequestKey = () => ethers.Wallet.createRandom().address;
+
   // Test fixture for consistent setup
   async function deployGovernanceFixture() {
     const [owner, addr1, addr2] = await ethers.getSigners()
@@ -967,7 +972,7 @@ describe('VoxGovernanceFacet', function () {
         const applicationFee = currentQuotas.adminApplicantFeeInPolWei
         
         await expect(
-          governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmTest123", { value: applicationFee })
+          governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmTest123", newRequestKey(), { value: applicationFee })
         ).to.not.be.reverted
         
         const [, , , , proposedAdminAddresses] = await governanceLensFacet.returnGovernanceStorage()
@@ -980,7 +985,7 @@ describe('VoxGovernanceFacet', function () {
         const insufficientFee = 5n
         
         await expect(
-          governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmTest123", { value: insufficientFee })
+          governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmTest123", newRequestKey(), { value: insufficientFee })
         ).to.be.revertedWith('Insufficient POL sent to pay application fee')
       })
 
@@ -993,7 +998,7 @@ describe('VoxGovernanceFacet', function () {
         
         const balanceBefore = await ethers.provider.getBalance(addr1.address)
         
-        const tx = await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmTest123", { value: excessFee })
+        const tx = await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmTest123", newRequestKey(), { value: excessFee })
         const receipt = await tx.wait()
         const gasUsed = receipt.gasUsed * receipt.gasPrice
         
@@ -1009,13 +1014,13 @@ describe('VoxGovernanceFacet', function () {
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
         const fee = currentQuotas.adminApplicantFeeInPolWei
         
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmTest123", { value: fee })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmTest123", newRequestKey(), { value: fee })
         
         // Mine 2 blocks to clear flashLoanProtection cooldown (requires block.number > lastVoteBlock + 1)
         await ethers.provider.send("hardhat_mine", ["0x3"]);
         
         await expect(
-          governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmTest456", { value: fee })
+          governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmTest456", newRequestKey(), { value: fee })
         ).to.be.revertedWith('You have already declared yourself an applicant for this round.')
       })
 
@@ -1028,9 +1033,9 @@ describe('VoxGovernanceFacet', function () {
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
         const fee = currentQuotas.adminApplicantFeeInPolWei
         
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmAddr1", { value: fee })
-        await governanceFacet.connect(addr2).applyAsNewAdmin("ipfs://QmAddr2", { value: fee })
-        await governanceFacet.connect(addr3).applyAsNewAdmin("ipfs://QmAddr3", { value: fee })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmAddr1", newRequestKey(), { value: fee })
+        await governanceFacet.connect(addr2).applyAsNewAdmin("ipfs://QmAddr2", newRequestKey(), { value: fee })
+        await governanceFacet.connect(addr3).applyAsNewAdmin("ipfs://QmAddr3", newRequestKey(), { value: fee })
         
         const [, , , , proposedAdminAddresses] = await governanceLensFacet.returnGovernanceStorage()
         expect(proposedAdminAddresses).to.have.length(4) // âœ… Now 4 (incumbent + 3 applicants)
@@ -1049,8 +1054,8 @@ describe('VoxGovernanceFacet', function () {
         const storageId1 = "ipfs://QmTestAddr1Storage"
         const storageId2 = "ipfs://QmTestAddr2Storage"
         
-        await governanceFacet.connect(addr1).applyAsNewAdmin(storageId1, { value: fee })
-        await governanceFacet.connect(addr2).applyAsNewAdmin(storageId2, { value: fee })
+        await governanceFacet.connect(addr1).applyAsNewAdmin(storageId1, newRequestKey(), { value: fee })
+        await governanceFacet.connect(addr2).applyAsNewAdmin(storageId2, newRequestKey(), { value: fee })
         
         // Test getAdminApplicantStorageId
         const retrievedId1 = await governanceLensFacet.getAdminApplicantStorageId(addr1.address)
@@ -1071,8 +1076,8 @@ describe('VoxGovernanceFacet', function () {
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
         const fee = currentQuotas.adminApplicantFeeInPolWei
         
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmId1", { value: fee })
-        await governanceFacet.connect(addr2).applyAsNewAdmin("ipfs://QmId2", { value: fee })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmId1", newRequestKey(), { value: fee })
+        await governanceFacet.connect(addr2).applyAsNewAdmin("ipfs://QmId2", newRequestKey(), { value: fee })
         
         const [, , , , proposedAdminAddresses, , , adminStorageIds] = await governanceLensFacet.returnGovernanceStorage()
         
@@ -1089,8 +1094,8 @@ describe('VoxGovernanceFacet', function () {
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
         const fee = currentQuotas.adminApplicantFeeInPolWei
         
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", { value: fee })
-        await governanceFacet.connect(addr2).applyAsNewAdmin("ipfs://QmCandidate2", { value: fee })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", newRequestKey(), { value: fee })
+        await governanceFacet.connect(addr2).applyAsNewAdmin("ipfs://QmCandidate2", newRequestKey(), { value: fee })
         
         // âœ… FIXED: Only 3 return values (removed againstVotes)
         const [proposedOwners, forVotes, storageIds] = await governanceLensFacet.getProposedOwnersAndVotes()
@@ -1110,7 +1115,7 @@ describe('VoxGovernanceFacet', function () {
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
         const fee = currentQuotas.adminApplicantFeeInPolWei
         
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmFirstApplicant", { value: fee })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmFirstApplicant", newRequestKey(), { value: fee })
         
         // âœ… FIXED: Only 3 return values (removed againstVotes)
         const [proposedOwners, forVotes, storageIds] = await governanceLensFacet.getProposedOwnersAndVotes()
@@ -1128,7 +1133,7 @@ describe('VoxGovernanceFacet', function () {
         const fee = currentQuotas.adminApplicantFeeInPolWei
         
         await expect(
-          governanceFacet.connect(owner).applyAsNewAdmin("ipfs://QmOwner", { value: fee })
+          governanceFacet.connect(owner).applyAsNewAdmin("ipfs://QmOwner", newRequestKey(), { value: fee })
         ).to.be.revertedWith('Current owner cannot apply as new admin')
       })
     })
@@ -1139,7 +1144,7 @@ describe('VoxGovernanceFacet', function () {
         const { governanceFacet, governanceLensFacet, addr1 } = await loadFixture(deployGovernanceFixture)
         
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmTest", { value: currentQuotas.adminApplicantFeeInPolWei })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmTest", newRequestKey(), { value: currentQuotas.adminApplicantFeeInPolWei })
         
         await expect(governanceFacet.connect(addr1).revokeAdminApplication()).to.not.be.reverted
         
@@ -1156,9 +1161,9 @@ describe('VoxGovernanceFacet', function () {
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
         const fee = currentQuotas.adminApplicantFeeInPolWei
         
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://Qm1", { value: fee })
-        await governanceFacet.connect(addr2).applyAsNewAdmin("ipfs://Qm2", { value: fee })
-        await governanceFacet.connect(addr3).applyAsNewAdmin("ipfs://Qm3", { value: fee })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://Qm1", newRequestKey(), { value: fee })
+        await governanceFacet.connect(addr2).applyAsNewAdmin("ipfs://Qm2", newRequestKey(), { value: fee })
+        await governanceFacet.connect(addr3).applyAsNewAdmin("ipfs://Qm3", newRequestKey(), { value: fee })
         
         await governanceFacet.connect(addr2).revokeAdminApplication()
         
@@ -1180,7 +1185,7 @@ describe('VoxGovernanceFacet', function () {
         await advanceBlocksForVoting(15)
         
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", { value: currentQuotas.adminApplicantFeeInPolWei })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", newRequestKey(), { value: currentQuotas.adminApplicantFeeInPolWei })
         
         // âœ… FIXED: Removed boolean parameter
         await expect(
@@ -1210,7 +1215,7 @@ describe('VoxGovernanceFacet', function () {
         await tokenFacet.connect(owner).transfer(addr2.address, ethers.parseEther('1000'))
         
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", { value: currentQuotas.adminApplicantFeeInPolWei })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", newRequestKey(), { value: currentQuotas.adminApplicantFeeInPolWei })
         await advanceBlocksForVoting(15)
 
         // âœ… FIXED: Removed boolean parameter
@@ -1234,7 +1239,7 @@ describe('VoxGovernanceFacet', function () {
         await advanceBlocksForVoting(15)
         
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", { value: currentQuotas.adminApplicantFeeInPolWei })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", newRequestKey(), { value: currentQuotas.adminApplicantFeeInPolWei })
         
         // âœ… FIXED: Only support votes (removed boolean parameter)
         await governanceFacet.connect(addr2).voteForNewAdmin(addr1.address)
@@ -1261,7 +1266,7 @@ describe('VoxGovernanceFacet', function () {
         await advanceBlocksForVoting(15)
         
         const adminFee = currentQuotas.adminApplicantFeeInPolWei
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", { value: adminFee })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", newRequestKey(), { value: adminFee })
 
         // âœ… FIXED: Removed boolean parameter
         await governanceFacet.connect(addr2).voteForNewAdmin(addr1.address)
@@ -1272,8 +1277,9 @@ describe('VoxGovernanceFacet', function () {
 
         await advanceBlocksForVoting(blocksToAdvance)
         
-        const tx = await governanceFacet.ratifyNewAdmin()
-        await tx.wait()
+        await expect(governanceFacet.ratifyNewAdmin())
+          .to.emit(ownershipFacet, 'OwnershipTransferred')
+          .withArgs(owner.address, addr1.address)
         
         const ownerAfter = await ownershipFacet.owner()
         
@@ -1285,16 +1291,102 @@ describe('VoxGovernanceFacet', function () {
         const { governanceFacet, governanceLensFacet, addr1 } = await loadFixture(deployGovernanceFixture)
         
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", { value: currentQuotas.adminApplicantFeeInPolWei })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", newRequestKey(), { value: currentQuotas.adminApplicantFeeInPolWei })
         
         //advance blocks to pass admin vote deadline
         const [, , , , , , adminVoteDeadline] = await governanceLensFacet.returnGovernanceStorage()
         const currentBlock = await ethers.provider.getBlockNumber()
         const blocksToAdvance = Number(adminVoteDeadline) - currentBlock + 1
         await advanceBlocksForVoting(blocksToAdvance)
-        await expect(
-          governanceFacet.ratifyNewAdmin()
-        ).to.be.revertedWith('No candidates met the quorum')
+        // No winner: ratify now auto-retires the round instead of reverting.
+        await expect(governanceFacet.ratifyNewAdmin())
+          .to.emit(governanceFacet, 'GovernanceRoundCancelled')
+          .withArgs(0)
+      })
+    })
+
+    describe('ratifyNewAdmin auto-reset (no-quorum round retirement)', function () {
+      // Drives an election to a no-winner state: one non-incumbent applicant, no votes, deadline passed.
+      async function deployStalledElectionFixture() {
+        const fixture = await deployGovernanceFixture()
+        const { governanceFacet, governanceLensFacet, addr1 } = fixture
+
+        const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
+        await governanceFacet.connect(addr1).applyAsNewAdmin('ipfs://QmCandidate1', newRequestKey(), { value: currentQuotas.adminApplicantFeeInPolWei })
+
+        const [, , , , , , adminVoteDeadline] = await governanceLensFacet.returnGovernanceStorage()
+        const currentBlock = await ethers.provider.getBlockNumber()
+        await advanceBlocksForVoting(Number(adminVoteDeadline) - currentBlock + 1)
+        return fixture
+      }
+
+      it('is permissionless — a zero-balance non-owner can retire a stalled round', async function () {
+        const { governanceFacet, governanceLensFacet, ownershipFacet, owner, addr2 } = await loadFixture(deployStalledElectionFixture)
+
+        const [, , , , , roundBefore] = await governanceLensFacet.returnGovernanceStorage()
+
+        await expect(governanceFacet.connect(addr2).ratifyNewAdmin())
+          .to.emit(governanceFacet, 'GovernanceRoundCancelled')
+          .withArgs(roundBefore)
+
+        // Ownership is unchanged when no candidate qualifies.
+        expect(await ownershipFacet.owner()).to.equal(owner.address)
+      })
+
+      it('clears candidates, zeroes the deadline and bumps adminVoteId', async function () {
+        const { governanceFacet, governanceLensFacet } = await loadFixture(deployStalledElectionFixture)
+
+        const [, , , , candidatesBefore, roundBefore] = await governanceLensFacet.returnGovernanceStorage()
+        expect(candidatesBefore.length).to.be.greaterThan(0)
+
+        await governanceFacet.ratifyNewAdmin()
+
+        const [, , , , candidatesAfter, roundAfter, deadlineAfter] = await governanceLensFacet.returnGovernanceStorage()
+        expect(candidatesAfter).to.have.length(0)
+        expect(roundAfter).to.equal(roundBefore + 1n)
+        expect(deadlineAfter).to.equal(0)
+      })
+
+      it('does NOT revert on a stalled round (no deadlock)', async function () {
+        const { governanceFacet } = await loadFixture(deployStalledElectionFixture)
+        await expect(governanceFacet.ratifyNewAdmin()).to.not.be.reverted
+      })
+
+      it('allows a fresh election to start after an auto-retired round', async function () {
+        const { governanceFacet, governanceLensFacet, addr1 } = await loadFixture(deployStalledElectionFixture)
+        await governanceFacet.ratifyNewAdmin()
+
+        const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
+        await governanceFacet.connect(addr1).applyAsNewAdmin('ipfs://QmFresh', newRequestKey(), { value: currentQuotas.adminApplicantFeeInPolWei })
+
+        const [, , , , candidates, round] = await governanceLensFacet.returnGovernanceStorage()
+        // Incumbent + addr1 re-added under the new round id; no stale carry-over.
+        expect(candidates).to.have.length(2)
+        expect(round).to.equal(1)
+      })
+
+      it('still elects (does not reset) when a candidate meets quorum', async function () {
+        const { governanceFacet, governanceLensFacet, tokenFacet, ownershipFacet, owner, addr1, addr2 } = await loadFixture(deployGovernanceFixture)
+
+        const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
+        const totalSupply = await tokenFacet.totalSupply()
+        const quorumAmount = (totalSupply * BigInt(currentQuotas.voxAdminChangeQuorum)) / 100n
+        const votingAmount = quorumAmount + ethers.parseEther('1000')
+
+        await tokenFacet.connect(owner).transfer(addr2.address, votingAmount)
+        await advanceBlocksForVoting(15)
+
+        await governanceFacet.connect(addr1).applyAsNewAdmin('ipfs://QmCandidate1', newRequestKey(), { value: currentQuotas.adminApplicantFeeInPolWei })
+        await governanceFacet.connect(addr2).voteForNewAdmin(addr1.address)
+
+        const [, , , , , , adminVoteDeadline] = await governanceLensFacet.returnGovernanceStorage()
+        const currentBlock = await ethers.provider.getBlockNumber()
+        await advanceBlocksForVoting(Number(adminVoteDeadline) - currentBlock + 1)
+
+        await expect(governanceFacet.ratifyNewAdmin())
+          .to.emit(ownershipFacet, 'OwnershipTransferred')
+          .withArgs(owner.address, addr1.address)
+        expect(await ownershipFacet.owner()).to.equal(addr1.address)
       })
     })
   })
@@ -1322,8 +1414,8 @@ describe('VoxGovernanceFacet', function () {
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
         const fee = currentQuotas.adminApplicantFeeInPolWei
         
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", { value: fee })
-        await governanceFacet.connect(addr2).applyAsNewAdmin("ipfs://QmCandidate2", { value: fee })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", newRequestKey(), { value: fee })
+        await governanceFacet.connect(addr2).applyAsNewAdmin("ipfs://QmCandidate2", newRequestKey(), { value: fee })
         
         // âœ… FIXED: Removed boolean parameter
         await governanceFacet.connect(addr3).voteForNewAdmin(addr1.address)
@@ -1398,7 +1490,7 @@ describe('VoxGovernanceFacet', function () {
         const { governanceFacet, governanceLensFacet, addr1 } = await loadFixture(deployGovernanceFixture)
         
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", { value: currentQuotas.adminApplicantFeeInPolWei })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://QmCandidate1", newRequestKey(), { value: currentQuotas.adminApplicantFeeInPolWei })
         
         const [, , , , proposedAdminAddresses, adminVoteId] = await governanceLensFacet.returnGovernanceStorage()
         // âœ… FIX: Now 2 (incumbent + addr1)
@@ -1411,7 +1503,14 @@ describe('VoxGovernanceFacet', function () {
         const blocksToAdvance = Number(adminVoteDeadline) - currentBlock + 1
         await advanceBlocksForVoting(blocksToAdvance)
         
-        await expect(governanceFacet.ratifyNewAdmin()).to.be.revertedWith('No candidates met the quorum')
+        // No winner: the round auto-retires (adminVoteId 0 -> 1) rather than deadlocking.
+        await expect(governanceFacet.ratifyNewAdmin())
+          .to.emit(governanceFacet, 'GovernanceRoundCancelled')
+          .withArgs(0)
+
+        const [, , , , candidatesAfter, adminVoteIdAfter] = await governanceLensFacet.returnGovernanceStorage()
+        expect(candidatesAfter).to.have.length(0)
+        expect(adminVoteIdAfter).to.equal(1)
       })
     })
 
@@ -1440,13 +1539,13 @@ describe('VoxGovernanceFacet', function () {
         const [, , , currentQuotas] = await governanceLensFacet.returnGovernanceStorage()
         const fee = currentQuotas.adminApplicantFeeInPolWei
         
-        const gas1 = await governanceFacet.connect(addr1).applyAsNewAdmin.estimateGas("ipfs://Qm1", { value: fee })
+        const gas1 = await governanceFacet.connect(addr1).applyAsNewAdmin.estimateGas("ipfs://Qm1", newRequestKey(), { value: fee })
 
-        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://Qm1", { value: fee })
-        const gas2 = await governanceFacet.connect(addr2).applyAsNewAdmin.estimateGas("ipfs://Qm2", { value: fee })
+        await governanceFacet.connect(addr1).applyAsNewAdmin("ipfs://Qm1", newRequestKey(), { value: fee })
+        const gas2 = await governanceFacet.connect(addr2).applyAsNewAdmin.estimateGas("ipfs://Qm2", newRequestKey(), { value: fee })
 
-        await governanceFacet.connect(addr2).applyAsNewAdmin("ipfs://Qm2", { value: fee })
-        const gas3 = await governanceFacet.connect(addr3).applyAsNewAdmin.estimateGas("ipfs://Qm3", { value: fee })
+        await governanceFacet.connect(addr2).applyAsNewAdmin("ipfs://Qm2", newRequestKey(), { value: fee })
+        const gas3 = await governanceFacet.connect(addr3).applyAsNewAdmin.estimateGas("ipfs://Qm3", newRequestKey(), { value: fee })
 
         expect(gas2).to.be.lessThan(gas1 * 2n)
         expect(gas3).to.be.lessThan(gas1 * 3n)
@@ -1698,8 +1797,8 @@ describe('VoxGovernanceFacet', function () {
         
         // Apply as admin candidates
         const fee = ethers.parseEther('1000')
-        await governanceFacet.connect(addr1).applyAsNewAdmin('storage-id-1', { value: fee })
-        await governanceFacet.connect(addr2).applyAsNewAdmin('storage-id-2', { value: fee })
+        await governanceFacet.connect(addr1).applyAsNewAdmin('storage-id-1', newRequestKey(), { value: fee })
+        await governanceFacet.connect(addr2).applyAsNewAdmin('storage-id-2', newRequestKey(), { value: fee })
         
         const [candidates, balances, voteId, deadline, candidateCount] = await governanceLensFacet.getAdminElectionState()
         
@@ -1865,7 +1964,7 @@ describe('VoxGovernanceFacet', function () {
         await advanceBlocksForVoting(15)
         
         const fee = ethers.parseEther('1000')
-        await governanceFacet.connect(addr2).applyAsNewAdmin('storage-id', { value: fee })
+        await governanceFacet.connect(addr2).applyAsNewAdmin('storage-id', newRequestKey(), { value: fee })
         
         const canVote = await governanceLensFacet.canVoteForAdmin(addr1.address, addr2.address)
         expect(canVote).to.be.true

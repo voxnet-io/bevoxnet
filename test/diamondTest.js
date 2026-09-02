@@ -28,15 +28,15 @@ describe('DiamondTest', async function () {
     ownershipFacet = await ethers.getContractAt('OwnershipFacet', diamondAddress)
   })
 
-  // 10 facets (added TokenLensFacet)
-  it('should have ten facets -- call to facetAddresses function', async () => {
+  // 11 facets (added VoxRequestKeyFacet)
+  it('should have eleven facets -- call to facetAddresses function', async () => {
     for (const address of await diamondLoupeFacet.facetAddresses()) {
       addresses.push(address)
     }
 
     console.log('Deployed facets:', addresses.length)
     console.log('Facet addresses:', addresses)
-    assert.equal(addresses.length, 10) // DiamondCut, DiamondLoupe, Ownership, Token, Governance, Vox, ChapterLens, VoxAssistant, GovernanceLens, TokenLens
+    assert.equal(addresses.length, 11) // DiamondCut, DiamondLoupe, Ownership, Token, Governance, Vox, ChapterLens, VoxAssistant, GovernanceLens, TokenLens, RequestKey
   })
 
   it('facets should have the right function selectors -- call to facetFunctionSelectors function', async () => {
@@ -101,9 +101,9 @@ describe('DiamondTest', async function () {
     await test1Facet.test1Func10()
   })
 
-  // Test1Facet is at index 10 now
+  // Test1Facet is at index 11 now
   it('should replace supportsInterface function', async () => {
-    const test1Address = addresses[10] // Test1Facet is at index 10 now
+    const test1Address = addresses[11] // Test1Facet is at index 11 now
     const test1Facet = await ethers.getContractAt('Test1Facet', test1Address)
     const selectors = getSelectors(test1Facet).get(['supportsInterface(bytes4)'])
     
@@ -148,9 +148,9 @@ describe('DiamondTest', async function () {
     assert.sameMembers(Array.from(result), selectors)
   })
 
-  // Test2Facet is at index 11
+  // Test2Facet is at index 12
   it('should remove some test2 functions', async () => {
-    const test2Address = addresses[11] // Test2Facet is at index 11
+    const test2Address = addresses[12] // Test2Facet is at index 12
     const test2Facet = await ethers.getContractAt('Test2Facet', test2Address)
     const functionsToKeep = ['test2Func1()', 'test2Func5()', 'test2Func6()', 'test2Func19()', 'test2Func20()']
     
@@ -172,9 +172,9 @@ describe('DiamondTest', async function () {
     assert.sameMembers(Array.from(result), selectors.get(functionsToKeep))
   })
 
-  // Test1Facet at index 10
+  // Test1Facet at index 11
   it('should remove some test1 functions', async () => {
-    const test1Address = addresses[10] // Test1Facet is at index 10
+    const test1Address = addresses[11] // Test1Facet is at index 11
     const test1Facet = await ethers.getContractAt('Test1Facet', test1Address)
     const functionsToKeep = ['test1Func2()', 'test1Func11()', 'test1Func12()']
     

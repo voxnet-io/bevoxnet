@@ -6,6 +6,13 @@ import {IERC173} from "../interfaces/IERC173.sol";
 import {LibVoxTokenStorage} from "../libraries/LibVoxTokenStorage.sol";
 import {LibVoxGovernanceStorage} from "../libraries/LibVoxGovernanceStorage.sol";
 
+/// @dev Intra-diamond self-call surface exposed by VoxRequestKeyFacet. Both helpers enforce
+///      `msg.sender == address(this)`, so they are only reachable via a self-call from this facet.
+interface IVoxRequestKeyOps {
+    function validateRequestKeyOnlyDiamond(address newKey, address prospectiveOwner) external view;
+    function rotateRequestKeyOnlyDiamond(address newKey, address changedBy) external;
+}
+
 contract OwnershipFacet is IERC173 {
     address internal immutable diamondAddressForDirectCalls;
 
@@ -16,9 +23,27 @@ contract OwnershipFacet is IERC173 {
     constructor(address _diamondAddress) {
         diamondAddressForDirectCalls = _diamondAddress;
     }
-    function transferOwnership(address _newOwner) external override {
+
+    /// @notice Disabled: ownership can never move without atomically rotating the requestKey.
+    /// @dev Retains the ERC-173 selector (so tooling/ABIs still resolve it) but always reverts. Use
+    ///      `transferOwnership(address,address)` instead.
+    function transferOwnership(address) external pure override {
+        revert("Use transferOwnership(address,address)");
+    }
+
+    /// @notice Atomically hand over ownership and rotate the protocol requestKey.
+    /// @dev Validation and rotation live in VoxRequestKeyFacet, reached here via intra-diamond
+    ///      self-call, so a departed owner immediately loses signing-service request access. The new
+    ///      requestKey must be nonzero, differ from `_newOwner`, actually change, and differ from the
+    ///      governance chapterSignerAddress (enforced by validateRequestKeyOnlyDiamond).
+    /// @param _newOwner The address to become the new contract owner.
+    /// @param _newRequestKey The requestKey the new owner controls, published on-chain on handover.
+    function transferOwnership(address _newOwner, address _newRequestKey) external {
         LibDiamond.enforceIsContractOwner();
+        require(_newOwner != address(0), "New owner cannot be zero address");
+        IVoxRequestKeyOps(address(this)).validateRequestKeyOnlyDiamond(_newRequestKey, _newOwner);
         LibDiamond.setContractOwner(_newOwner);
+        IVoxRequestKeyOps(address(this)).rotateRequestKeyOnlyDiamond(_newRequestKey, msg.sender);
     }
 
     function owner() external view override returns (address owner_) {

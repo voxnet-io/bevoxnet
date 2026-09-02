@@ -82,7 +82,7 @@ describe('DiamondUpgradeGaps', function () {
       const { diamondCutFacet, ownershipFacet, test1, test1Selectors, owner, addr1 } =
         await loadFixture(deployFixture)
 
-      await ownershipFacet.connect(owner).transferOwnership(addr1.address)
+      await ownershipFacet.connect(owner)['transferOwnership(address,address)'](addr1.address, ethers.Wallet.createRandom().address)
       expect(await ownershipFacet.owner()).to.equal(addr1.address)
 
       const cut = [{

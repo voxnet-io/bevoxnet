@@ -6,6 +6,7 @@ import {IDiamondCut} from "../interfaces/IDiamondCut.sol";
 import {LibDiamond} from "../libraries/LibDiamond.sol";
 import {LibVoxTokenStorage} from "../libraries/LibVoxTokenStorage.sol";
 import {LibVoxGovernanceStorage} from "../libraries/LibVoxGovernanceStorage.sol";
+import {LibVoxRequestKeyStorage} from "../libraries/LibVoxRequestKeyStorage.sol";
 import {LibVoxStorage} from "../libraries/LibVoxStorage.sol";
 import {LibVoxViewStructs} from "../libraries/LibVoxViewStructs.sol";
 
@@ -22,7 +23,7 @@ import {LibVoxViewStructs} from "../libraries/LibVoxViewStructs.sol";
  *      Functions moved here: getCurrentGovernanceState, getAdminElectionState,
  *      getAllCurrentQuotas, getProposalState, getAdminApplicantStorageId,
  *      returnGovernanceStorage, getProposedOwnersAndVotes, getFullGovernanceDashboard,
- *      canVoteOnProposal, canVoteForAdmin, returnSigningAddress, returnStorageProviderAddress,
+ *      canVoteOnProposal, canVoteForAdmin, returnChapterSignerAddress, returnStorageProviderAddress,
  *      getUserPlatformBanBlockNumber.
  */
 contract GovernanceLensFacet {
@@ -65,9 +66,15 @@ contract GovernanceLensFacet {
     // SIMPLE GETTERS
     // ============================================
 
-    /// @notice Returns the current signing address used for governance signature verification.
-    function returnSigningAddress() public view returns (address) {
-        return _gov().signingAddress;
+    /// @notice Returns the current chapter-signer address used for chapter-creation signature verification.
+    function returnChapterSignerAddress() public view returns (address) {
+        return _gov().chapterSignerAddress;
+    }
+
+    /// @notice Returns the current live requestKey (the signing service's on-chain source of truth).
+    /// @dev Publish-only address that rotates atomically with ownership; see VoxRequestKeyFacet.
+    function returnRequestKey() public view returns (address) {
+        return LibVoxRequestKeyStorage.requestKeyStorage().requestKey;
     }
 
     /// @notice Returns the storage provider address that manages decentralized content.

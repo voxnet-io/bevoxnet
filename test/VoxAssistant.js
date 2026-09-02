@@ -311,7 +311,7 @@ describe('VoxAssistant Role', function () {
     it('VoxAssistant cannot call VOX-only functions (transferOwnership)', async function () {
       const { ownershipFacet, voxa1, outsider } = await loadFixture(activeAssistantFixture)
       await expect(
-        ownershipFacet.connect(voxa1).transferOwnership(outsider.address)
+        ownershipFacet.connect(voxa1)['transferOwnership(address,address)'](outsider.address, ethers.Wallet.createRandom().address)
       ).to.be.revertedWith('LibDiamond: Must be contract owner')
     })
   })

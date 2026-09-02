@@ -200,10 +200,10 @@ contract VoxFacet is ReentrancyGuard {
         // Verify signature — payload binds chapter name, caller address, and chain ID
         // to prevent front-running (reuse of a sig by a different wallet) and replay
         // across chains. The platform signing key signs keccak256(chapterName || msg.sender || chainid).
-        address platformSigningAddress = govStorage.signingAddress;
+        address chapterSigner = govStorage.chapterSignerAddress;
         bytes32 messageHash = MessageHashUtils.toEthSignedMessageHash(keccak256(abi.encodePacked(chapterName, msg.sender, block.chainid)));
         address recoveredSigner = ECDSA.recover(messageHash, signature);
-        require(recoveredSigner == platformSigningAddress, "Invalid signature");
+        require(recoveredSigner == chapterSigner, "Invalid signature");
 
         // Validate caller eligibility
         if (msg.sender != diamondStorage.contractOwner) {

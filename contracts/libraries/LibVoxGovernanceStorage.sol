@@ -81,7 +81,7 @@ library LibVoxGovernanceStorage {
         uint256 adminVoteId;
         uint256 adminVoteDeadline;
         address storageProviderAddress;
-        address signingAddress;
+        address chapterSignerAddress;
         mapping(address => mapping(uint256 => bool)) isAdminApplicant;
         mapping(address => mapping(uint256 => mapping(address => uint256))) adminVotesByUser; // voter => voteId => candidate => votes
         mapping(uint256 => mapping(address => uint256)) totalVotesPerAdminCandidate; // voteId => candidate => total votes
@@ -106,6 +106,10 @@ library LibVoxGovernanceStorage {
         // the single self-call to executeGovernanceCut. This is regular storage, not EIP-1153
         // transient storage — set and cleared within the same transaction.
         bool governanceCutInProgress;
+        // Per-(candidate, adminVoteId) requestKey supplied at application. Activated (rotated live via
+        // VoxRequestKeyFacet) only if that candidate wins ratifyNewAdmin and is not the incumbent.
+        // Append-only: MUST remain the last field — never reorder the fields above it.
+        mapping(address => mapping(uint256 => address)) adminApplicantRequestKey;
     }
 
     function governanceStorage() internal pure returns (GovernanceStorage storage gs) {

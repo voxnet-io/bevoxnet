@@ -36,17 +36,40 @@ const mainnetAccounts = isHexKey(PRIVATEKEYMAINNET) ? [PRIVATEKEYMAINNET] : [];
  */
 module.exports = {
   solidity: {
-    version: "0.8.22",
-    settings: {
-      optimizer: {
-        enabled: true,
-        runs: 200,
-      },
-      viaIR: true,
-      // Keep user-supplied require strings; omit compiler-generated debug strings
-      // to reduce mainnet bytecode size and deploy gas.
-      debug: {
-        revertStrings: "default"
+    compilers: [
+      {
+        version: "0.8.22",
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 200,
+          },
+          viaIR: true,
+          // Keep user-supplied require strings; omit compiler-generated debug strings
+          // to reduce mainnet bytecode size and deploy gas.
+          debug: {
+            revertStrings: "default"
+          }
+        }
+      }
+    ],
+    // VoxGovernanceFacet sits at the EIP-170 24,576-byte runtime cap. Compiling it with a
+    // lower optimizer `runs` trades a little governance runtime gas for smaller bytecode so
+    // the facet stays deployable on mainnet/testnet. runs=100 keeps ~1.6 KiB of headroom for
+    // future governance additions; all other contracts keep runs=200.
+    overrides: {
+      "contracts/facets/VoxGovernanceFacet.sol": {
+        version: "0.8.22",
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 100,
+          },
+          viaIR: true,
+          debug: {
+            revertStrings: "default"
+          }
+        }
       }
     }
   },
@@ -90,6 +113,6 @@ module.exports = {
     alphaSort: true,
     disambiguatePaths: false,
     runOnCompile: true,
-    strict: false, // warn only — VoxGovernanceFacet (~23.2KiB) is closest to the 24.576KiB limit
+    strict: false, // warn only — VoxGovernanceFacet (~22.9KiB at its runs=100 override) is closest to the 24.576KiB limit
   },
 }
