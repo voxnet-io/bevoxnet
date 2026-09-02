@@ -13,8 +13,6 @@ library LibVoxTokenStorage {
         string symbol;
         mapping(address => uint256) balances;
         mapping(address => mapping(address => uint256)) allowances;
-        // uint256 totalAggregateDividend;
-        // mapping(address => uint256) lastTotalAggregateDividendAmount;
         uint256 totalAggregateRewardInPOLWei;
         uint256 totalAggregateRewardInUSDC;
         //
