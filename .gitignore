@@ -12,5 +12,14 @@ artifacts
 # Internal-only working docs (kept locally, not published)
 internal/
 
+# Project continuity tracker (local working state, not distributable source)
+progress-notes/
+
 # Local Hardhat chain deployment artifact (meaningless off-chain)
 deployments-1337.json
+
+# AI / engineering-standards working doc — kept local, not published
+/CLAUDE.MD
+
+# VS Code workspace file — local editor config, not published
+/bevoxnet.code-workspace
