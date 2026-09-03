@@ -13,6 +13,10 @@ pragma solidity ^0.8.22;
 ///      here and never part of any signature payload (the VoxFacet chapter-creation gate keeps using
 ///      `chapterSignerAddress`). It rotates atomically with ownership, so a rotated-out owner immediately
 ///      loses the ability to request signatures.
+///
+///      TEE-only: it is consumed only by the future TEE/enclave (aegis) signing path, which verifies a
+///      requestKey-signed request envelope. The current KMS backend does NOT use it, so the stored
+///      value is inert today; kept on-chain so the TEE cutover needs no upgrade.
 library LibVoxRequestKeyStorage {
     bytes32 constant STORAGE_POSITION = keccak256("vox.requestkey.storage");
 

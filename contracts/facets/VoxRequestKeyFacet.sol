@@ -10,6 +10,11 @@ import {LibVoxGovernanceStorage} from "../libraries/LibVoxGovernanceStorage.sol"
 /// @notice Owns the protocol requestKey: the address the off-chain signing service authenticates
 ///         request callers against. Published on-chain (never `ecrecover`'d), rotates atomically with
 ///         ownership.
+/// @dev TEE-only: the requestKey is consumed only by the future TEE/enclave (aegis) signing path,
+///      which authenticates each sign-request via a requestKey-signed envelope. The current
+///      production backend is KMS, which does NOT use it (KMS signs with a bearer IAM credential; no
+///      envelope check), so today the on-chain key is published/rotated but inert - kept now so the
+///      eventual TEE cutover needs no contract upgrade.
 /// @dev Storage lives in LibVoxRequestKeyStorage (accessor only). The two `...OnlyDiamond` helpers are
 ///      reached by intra-diamond self-call from OwnershipFacet.transferOwnership and the
 ///      VoxGovernanceFacet admin-election flow, so their validate/rotate bytecode does not inflate
